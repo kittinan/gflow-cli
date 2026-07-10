@@ -459,6 +459,11 @@ class FlowApiClient:
                 "--password-store=basic",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
+                # VirtualGL: Chrome's GPU sandbox blocks VGL from cloning the X
+                # display connection to the 3D X server, crashing the GPU process
+                # (exit 256) into software rendering. Added only under vglrun
+                # (VGL_ISACTIVE=1) so hardware GPU acceleration works; inert otherwise.
+                *(["--disable-gpu-sandbox"] if os.environ.get("VGL_ISACTIVE") == "1" else []),
             ],
         }
         if self.settings.har_path is not None:

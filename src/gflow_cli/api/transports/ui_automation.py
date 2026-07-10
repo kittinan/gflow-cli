@@ -1012,6 +1012,11 @@ class UiAutomationTransport(VideoGenerationMixin):
                     "--disable-blink-features=AutomationControlled",
                     "--password-store=basic",
                     "--disable-dev-shm-usage",
+                    # VirtualGL: the GPU sandbox blocks VGL from cloning the X
+                    # display connection, crashing Chrome's GPU process into
+                    # software rendering. Added only under vglrun (VGL_ISACTIVE=1)
+                    # so hardware GPU acceleration works; inert otherwise.
+                    *(["--disable-gpu-sandbox"] if os.environ.get("VGL_ISACTIVE") == "1" else []),
                 ],
             )
             # Hide the automation flag so reCAPTCHA Enterprise doesn't score
