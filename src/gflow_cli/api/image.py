@@ -439,6 +439,12 @@ class GenerateImageRequest:
     # Requested Flow UI arm (#299) from --ui-mode; None → resolve from
     # GFLOW_CLI_UI_MODE / default at the transport. Not sent on the wire.
     ui_mode: UiMode | None = None
+    # Attach the account's Flow Avatar/likeness through the editor's Add-Media
+    # dialog before submitting. Never serialized by the body builders below:
+    # gflow does not forge `referenceLikenesses`, the UI click makes Flow's own
+    # JS emit it. Mutually exclusive with every other reference kind — see
+    # ``_validate_avatar``.
+    use_avatar: bool = False
 
     def __post_init__(self) -> None:
         if not self.prompt or not self.prompt.strip():
@@ -454,6 +460,34 @@ class GenerateImageRequest:
             raise ValueError(
                 msg,
             )
+        self._validate_avatar(n_refs)
+
+    def _validate_avatar(self, n_refs: int) -> None:
+        """Avatar image generation is prompt + likeness ONLY.
+
+        Combining the account Avatar with an image reference (``--ref``), a
+        pre-uploaded media UUID, or a CHARACTER entity is refused rather than
+        guessed: there is no capture proving Flow accepts `referenceLikenesses`
+        together with `imageInputs`/`referenceEntities` on the image route, and
+        an unverified combination would be billed to the user before anyone
+        found out. Relax this only with a captured payload in the commit.
+        """
+        if self.use_avatar and n_refs > 0:
+            msg = (
+                "use_avatar cannot be combined with refs, ref_paths, or "
+                "reference_entities on an image request — avatar image "
+                "generation is prompt + likeness only"
+            )
+            raise ValueError(msg)
+
+    @property
+    def attaches_likeness(self) -> bool:
+        """True when the transport must attach the account Avatar/likeness.
+
+        Mirrors ``GenerateVideoRequest.attaches_likeness`` so both transports
+        branch on the same-named predicate.
+        """
+        return self.use_avatar
 
 
 def _client_context(*, project_id: str, recaptcha_token: str, session_id: str) -> dict[str, Any]:

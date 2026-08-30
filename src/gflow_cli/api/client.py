@@ -45,6 +45,7 @@ from gflow_cli.api.dto import (
     GeneratedImage,
     GenerationCheckpoint,
     GenerationCheckpointObserver,
+    LikenessEligibility,
     ProjectInfo,
 )
 from gflow_cli.api.image_upscale import (
@@ -2612,6 +2613,47 @@ class FlowApiClient:
             project_id=project_id,
             count=len(entity_ids),
         )
+
+    async def check_likeness_eligibility(self) -> LikenessEligibility:
+        """Ask Flow whether this account may use its Avatar/likeness. FREE.
+
+        ``GET /v1/flow/likeness:checkEligibility`` is a Bearer-REST read — no
+        reCAPTCHA, no credits, no browser dialog — so it is the cheapest possible
+        gate in front of an avatar generation.
+
+        NEVER raises for an inconclusive answer: any transport/parse failure
+        returns :meth:`LikenessEligibility.undetermined`, and the caller falls
+        through to the UI gate (which opens the Add-Media dialog and refuses to
+        submit if the Avatar surface is absent). Turning a wire hiccup into a
+        hard refusal would break working accounts; turning it into an assumed
+        "eligible" would spend credits on a generation that drops the likeness —
+        the third state exists so neither happens.
+
+        Auth failures are the one exception worth surfacing: an expired session
+        is an actionable, non-avatar problem the user must fix either way, and
+        the very next call would raise it anyway.
+        """
+        try:
+            data = await self._get_json(
+                routes.LIKENESS_CHECK_ELIGIBILITY,
+                route_name="likeness:checkEligibility",
+            )
+        except AuthExpiredError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — inconclusive, not fatal
+            logger.info(
+                "likeness.eligibility_undetermined",
+                error_class=type(exc).__name__,
+            )
+            return LikenessEligibility.undetermined()
+        result = LikenessEligibility.from_response(data)
+        logger.info(
+            "likeness.eligibility_checked",
+            eligible=result.eligible,
+            determined=result.determined,
+            reasons=list(result.reasons),
+        )
+        return result
 
     async def generate_character_image(
         self,

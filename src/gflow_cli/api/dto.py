@@ -46,6 +46,57 @@ GenerationCheckpointObserver = Callable[[GenerationCheckpoint], None]
 
 
 @dataclass(frozen=True)
+class LikenessEligibility:
+    """Answer from ``GET /v1/flow/likeness:checkEligibility`` (FREE, no credits).
+
+    Flow gates its Avatar/likeness (``referenceLikenesses``) on a verified
+    identity scan AND a permitted region. The endpoint answers with an
+    ``ineligibilityReasons`` array — EMPTY/absent means usable, non-empty names
+    the gate (``"REGION"`` is what this project's own accounts return; see
+    docs/CHARACTER.md).
+
+    ``determined`` is the honest third state. A non-200, an unparseable body, or
+    a shape gflow does not recognise must NOT be read as "eligible" (that would
+    spend credits on a generation that silently drops the likeness) NOR as
+    "ineligible" (that would refuse a working account over a wire change). When
+    ``determined`` is False the caller falls through to the UI gate, which
+    inspects the real Add-Media dialog and still refuses to submit if the Avatar
+    surface is absent.
+    """
+
+    eligible: bool
+    determined: bool
+    reasons: tuple[str, ...] = ()
+
+    @classmethod
+    def undetermined(cls) -> LikenessEligibility:
+        """The probe could not answer — defer to the UI gate, never to a guess."""
+        return cls(eligible=False, determined=False)
+
+    @classmethod
+    def from_response(cls, data: object) -> LikenessEligibility:
+        """Parse the endpoint body; anything unrecognised is UNDETERMINED.
+
+        Deliberately tolerant in one direction only: a dict with no
+        ``ineligibilityReasons`` key is a positive answer (the field is omitted
+        when there is nothing to report), while a non-dict body means gflow is
+        not looking at the response it thinks it is.
+        """
+        if not isinstance(data, dict):
+            return cls.undetermined()
+        payload = cast("dict[str, Any]", data)
+        if "ineligibilityReasons" not in payload:
+            return cls(eligible=True, determined=True)
+        raw = payload.get("ineligibilityReasons")
+        if raw is None:
+            return cls(eligible=True, determined=True)
+        if not isinstance(raw, list):
+            return cls.undetermined()
+        reasons = tuple(str(r) for r in cast("list[object]", raw))
+        return cls(eligible=not reasons, determined=True, reasons=reasons)
+
+
+@dataclass(frozen=True)
 class ProjectInfo:
     """A Flow project — owns assets, jobs, library entries."""
 
