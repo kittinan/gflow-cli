@@ -21,7 +21,7 @@ import re
 import time
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import structlog
 
@@ -51,6 +51,7 @@ from gflow_cli.api.video import (
 )
 from gflow_cli.errors import (
     AuthExpiredError,
+    AvatarUnavailableError,
     FlowAgentUiError,
     FlowAppError,
     MediaUploadRejectedError,
@@ -396,6 +397,50 @@ def _playwright_version() -> str:
 ADD_MEDIA_BUTTON = "button[aria-haspopup='dialog']:has(i.google-symbols:text-is('add_2'))"
 # Resource picker (spike-verified 2026-06-06, locale-agnostic via ligatures/id).
 PICKER_SEARCH_INPUT = "#add-menu-input"
+# Avatar / likeness tab inside the SAME Add-Media picker dialog.
+#
+# ⚠ UNVERIFIED AGAINST LIVE FLOW. Every other selector family in this module
+# carries a live capture date; this one deliberately does not. Flow's Avatar is
+# verified-identity + region gated and `likeness:checkEligibility` answers
+# `["REGION"]` on this project's accounts (docs/CHARACTER.md), so the tab could
+# not be opened to read its real DOM. The tiers below are ordered by how much
+# they would survive a locale change, NOT by measured hit rate, and the code
+# that consumes them is written so that a total miss is a typed refusal with a
+# screenshot — never a fall-through to a plain t2v/t2i that silently bills the
+# user for a generation without their likeness.
+#
+# Tier 1 (structural, locale-free): Radix tab triggers carry
+# `id="radix-:rN:-trigger-<VALUE>"`. This is the exact shape already VERIFIED for
+# the video sub-mode tabs (`VIDEO_SUBMODE_SELECTORS`), so the pattern is known
+# good even though these particular VALUEs are inferred.
+# Tier 2 (icon ligature, locale-free): scoped to `[role='tab']` INSIDE the open
+# picker dialog, whose known tabs are Characters (`accessibility_new`), Voices
+# (`voice_selection`) and Uploads (`drive_folder_upload`) — so a face/person
+# ligature on a tab in that dialog has no plausible second meaning.
+# Tier 3 (localized text, BOUNDED): the same defence-in-depth pattern as
+# `PICKER_INCLUDE_BUTTON` (#170). "Avatar" is the literal word in most Latin-
+# script locales; the non-Latin captions are the standard renderings.
+AVATAR_TAB_SELECTORS: tuple[str, ...] = (
+    "[role='tab'][id$='-trigger-AVATAR']",
+    "[role='tab'][id$='-trigger-LIKENESS']",
+    "[role='dialog'][data-state='open'] [role='tab']:has(i.google-symbols:text-is('face'))",
+    "[role='dialog'][data-state='open'] [role='tab']"
+    ":has(i.google-symbols:text-is('account_circle'))",
+    "[role='dialog'][data-state='open'] [role='tab']:has-text('Avatar'),"
+    " [role='dialog'][data-state='open'] [role='tab']:has-text('アバター'),"
+    " [role='dialog'][data-state='open'] [role='tab']:has-text('아바타'),"
+    " [role='dialog'][data-state='open'] [role='tab']:has-text('Аватар'),"
+    " [role='dialog'][data-state='open'] [role='tab']:has-text('头像')",
+)
+# Any tab inside the open picker. Used to tell "this account has no Avatar tab"
+# (other tabs rendered fine -> AvatarUnavailableError) apart from "the picker
+# itself drifted" (no tabs at all -> UiSelectorDriftError). Without this probe
+# both failures collapse into one message and the user cannot tell whether to
+# check their account or file a selector bug.
+PICKER_ANY_TAB = "[role='dialog'][data-state='open'] [role='tab']"
+# How long to wait for the picker to close after the avatar include. Same budget
+# as every other include path in this module.
+AVATAR_PICKER_CLOSE_TIMEOUT_S = REMOTE_PICKER_CLOSE_TIMEOUT_S
 PICKER_PERSONAGENS_TAB = (
     "[role='tab']:has(i.google-symbols:text-is('accessibility_new')),"
     " button:has(i.google-symbols:text-is('accessibility_new'))"
@@ -3168,6 +3213,136 @@ class VideoGenerationMixin:
         ) from last_exc
 
     @staticmethod
+    async def _attach_likeness(
+        page: Page,
+        *,
+        out_dir: Path | None,
+    ) -> None:
+        """Attach the account's Flow Avatar/likeness through the Add-Media picker.
+
+        Sequence: Add Media (``add_2``) -> Avatar tab -> the same locale-safe
+        include action every other picker path uses -> confirm the picker closed.
+        gflow never writes ``referenceLikenesses`` itself; the include click is
+        what makes Flow's own JS put it on the outgoing request.
+
+        The caller MUST already have the editor in the References/Ingredients
+        sub-mode — the ``add_2`` button is not rendered on the bare Video tab.
+
+        Three distinct failures, three distinct answers, and **none of them
+        continues toward a submit**:
+
+        * ``add_2`` missing -> :class:`UiSelectorDriftError`. The composer is not
+          where the caller promised it would be.
+        * picker open, tabs render, but no Avatar tab ->
+          :class:`AvatarUnavailableError`. Flow's Avatar is verified-identity +
+          region gated; on an ineligible account the tab simply is not drawn, and
+          no gflow release can fix that. Telling the user to file a selector bug
+          would waste their time.
+        * picker open with NO tabs at all -> :class:`UiSelectorDriftError`. The
+          picker's own structure changed, which IS a gflow problem.
+
+        Every exit path presses Escape twice before raising: a Page must never
+        return to the pool with an open dialog.
+        """
+        add = await VideoGenerationMixin._probe_selector_cascade(
+            page,
+            "avatar_add_media",
+            (ADD_MEDIA_BUTTON,),
+            timeout_ms=8000,
+        )
+        if add is None:
+            shot = await _capture_debug_screenshot(page, out_dir, "debug_no_add_media_avatar.png")
+            raise UiSelectorDriftError(
+                selector_drift_detail(
+                    "avatar_add_media",
+                    "the Add Media button was not found before attaching the avatar "
+                    "(the editor should already be in references/ingredients mode).",
+                    shot,
+                )
+            )
+        await add.click()
+        await page.wait_for_timeout(800)
+
+        tab = await VideoGenerationMixin._probe_selector_cascade(
+            page,
+            "avatar_tab",
+            AVATAR_TAB_SELECTORS,
+        )
+        if tab is None:
+            await VideoGenerationMixin._raise_avatar_tab_missing(page, out_dir=out_dir)
+        await tab.click(force=True)
+        await page.wait_for_timeout(700)
+
+        dialog = page.locator(DIALOG_ANY).last
+        include = await VideoGenerationMixin._resolve_include_action(
+            page,
+            PICKER_INCLUDE_BUTTON,
+            _INCLUDE_BUTTON_TIER_NAMES,
+            surface="avatar_tab",
+            detail="account avatar (likeness)",
+            out_dir=out_dir,
+            screenshot_name="debug_no_avatar_include.png",
+        )
+        await include.click(timeout=3000)
+        await page.wait_for_timeout(600)
+        # Evidence the attach REGISTERED, not merely that a button was clicked:
+        # Flow closes the picker when the include lands. Same check every other
+        # include path makes (`_attach_selected_tile`).
+        try:
+            await dialog.wait_for(state="hidden", timeout=AVATAR_PICKER_CLOSE_TIMEOUT_S * 1000)
+        except Exception as e:
+            shot = await _capture_debug_screenshot(page, out_dir, "debug_avatar_not_attached.png")
+            await page.keyboard.press("Escape")
+            await page.keyboard.press("Escape")
+            raise TransportTimeoutError(
+                f"the avatar picker did not close after "
+                f"{AVATAR_PICKER_CLOSE_TIMEOUT_S}s, so the likeness was not "
+                f"attached; aborted before submitting."
+                f"{screenshot_clause(shot)}",
+                remediation_hint=(
+                    "Open Flow in a browser on this profile and confirm the Avatar "
+                    "tab's include action works there. If it does, report the "
+                    "screenshot at https://github.com/ffroliva/gflow-cli/issues."
+                ),
+            ) from e
+        log.info("ui_automation_video.likeness_attached")
+
+    @staticmethod
+    async def _raise_avatar_tab_missing(page: Page, *, out_dir: Path | None) -> NoReturn:
+        """No Avatar tab matched — decide WHICH failure this is, then raise.
+
+        Split out so the distinction is testable on its own: the number of
+        sibling tabs in the open picker is the falsifiable signal separating
+        "this account has no Avatar" from "the picker drifted".
+        """
+        try:
+            sibling_tabs = await page.locator(PICKER_ANY_TAB).count()
+        except Exception:  # noqa: BLE001 — a count failure must not mask the real error
+            sibling_tabs = 0
+        shot = await _capture_debug_screenshot(page, out_dir, "debug_no_avatar_tab.png")
+        await page.keyboard.press("Escape")
+        await page.keyboard.press("Escape")
+        if sibling_tabs <= 0:
+            raise UiSelectorDriftError(
+                selector_drift_detail(
+                    "avatar_tab",
+                    "the Add Media picker rendered no tabs at all, so its structure has changed.",
+                    shot,
+                )
+            )
+        log.warning(
+            "ui_automation_video.avatar_tab_absent",
+            sibling_tabs=sibling_tabs,
+            note="picker rendered other tabs but no Avatar tab",
+        )
+        raise AvatarUnavailableError(
+            f"the Flow media picker opened and rendered {sibling_tabs} tab(s), but "
+            f"none of them is the Avatar tab, so this account cannot attach its "
+            f"likeness. Aborted before submitting — no credits were spent."
+            f"{screenshot_clause(shot)}"
+        )
+
+    @staticmethod
     async def _attach_character_entities(
         page: Page,
         entities: list[tuple[str, str]],
@@ -3713,13 +3888,26 @@ class VideoGenerationMixin:
         out_dir: Path | None,
         name_resolver: Callable[[str], str | None] | None = None,
     ) -> None:
-        """Attach I2V frames or R2V references/entities to the editor before submit."""
+        """Attach I2V frames, R2V references/entities, and/or the avatar likeness.
+
+        Ordering matters for ``Mode.R2V`` + ``use_avatar``: the reference images
+        and entities go on FIRST, then the likeness. Both use the same Add-Media
+        picker and each include re-opens it, so they compose rather than replace
+        — but attaching the likeness first would leave the ingredient attaches
+        clicking through a picker whose selected tab is Avatar.
+
+        The likeness attach is driven by ``attaches_likeness`` rather than by the
+        mode, which is what lets pure ``Mode.AVATAR`` and ``Mode.R2V`` +
+        ``use_avatar=True`` share one code path.
+        """
         if request.mode is Mode.I2V:
             await VideoGenerationMixin._attach_i2v_frames(
                 page, request, out_dir=out_dir, name_resolver=name_resolver
             )
         elif request.mode is Mode.R2V:
             await VideoGenerationMixin._attach_r2v_references(page, request, out_dir=out_dir)
+        if request.attaches_likeness:
+            await VideoGenerationMixin._attach_likeness(page, out_dir=out_dir)
 
     async def _submit_and_poll(
         self,

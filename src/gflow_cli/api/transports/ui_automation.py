@@ -2810,12 +2810,21 @@ class UiAutomationTransport(VideoGenerationMixin):
         # (UiModeUnavailableError, exit 28) if the arm is unreachable — so -i can
         # never silently no-op on a classic bind, and no credits are spent. The
         # cohort flaps per page load, so this runs every generation (no caching).
-        from gflow_cli.config import infer_required_ui_mode, resolve_ui_mode
+        from gflow_cli.config import UiMode, infer_required_ui_mode, resolve_ui_mode
 
         base_mode = request.ui_mode if request.ui_mode is not None else resolve_ui_mode(None)
         required_mode = infer_required_ui_mode(
             base_mode, has_instructions=bool(request.instructions)
         )
+        if request.attaches_likeness:
+            # The avatar attach drives the classic Add-Media picker; the agentic
+            # chat cohort renders no such dialog. Requiring classic here means an
+            # env-set GFLOW_CLI_UI_MODE=agentic gets the SAME pre-submit
+            # switch-and-verify every other classic requirement gets — and a
+            # UiModeUnavailableError (exit 28, retryable) with zero credits spent
+            # if the arm cannot be reached — instead of a confusing selector-drift
+            # failure on a button the agentic UI never draws.
+            required_mode = UiMode.CLASSIC
         # Inject ``self`` into the classic driver at construction (via the
         # factory) — never mutate ``_transport`` onto the driver after the fact.
         ui_driver = await get_ui_driver(page, ui_mode=required_mode, transport=self)
@@ -2870,6 +2879,15 @@ class UiAutomationTransport(VideoGenerationMixin):
                 zip_entity_refs(request.reference_entities, request.reference_entity_names),
                 out_dir=out_dir,
             )
+
+        # Avatar/likeness: same Add-Media picker as the video path (inherited
+        # from VideoGenerationMixin), no sub-mode switch needed — the image
+        # composer renders the add_2 button directly. The DTO already
+        # guarantees this is mutually exclusive with every ref kind above, so
+        # the ordering between them cannot matter here. A missing Avatar tab
+        # raises AvatarUnavailableError BEFORE the prompt is submitted.
+        if request.attaches_likeness:
+            await self._attach_likeness(page, out_dir=out_dir)
 
         # Wrap generation submission in the reference entities interceptor context.
         # This programmatically filters outgoing batchGenerateImages requests so that

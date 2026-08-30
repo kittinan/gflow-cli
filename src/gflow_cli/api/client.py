@@ -75,6 +75,7 @@ from gflow_cli.errors import (
     AisandboxAuthError,
     AuthExpiredError,
     AuthMissingError,
+    AvatarUnavailableError,
     BrowserSessionClosedError,
     ConfigurationError,
     ContentPolicyError,
@@ -2123,6 +2124,11 @@ class FlowApiClient:
             raise RuntimeError(
                 msg,
             )
+        # Avatar pre-flight BEFORE the reCAPTCHA mint: an ineligible account
+        # should not burn a token (or the WAF heat that minting one costs) on a
+        # request that can never succeed.
+        if req.attaches_likeness:
+            await self._require_likeness_eligibility(surface="image")
         token = await self._mint_recaptcha_token(recaptcha_action)
         req_with_token = _dc_replace(req, recaptcha_token=token)
         if on_checkpoint is not None:
@@ -2330,6 +2336,10 @@ class FlowApiClient:
             raise RuntimeError(
                 msg,
             )
+
+        # Avatar pre-flight (free Bearer read) before anything that could spend.
+        if req.attaches_likeness:
+            await self._require_likeness_eligibility(surface="video")
 
         wrapped_on_started = on_started
         if on_checkpoint is not None:
@@ -2654,6 +2664,24 @@ class FlowApiClient:
             reasons=list(result.reasons),
         )
         return result
+
+    async def _require_likeness_eligibility(self, *, surface: str) -> None:
+        """Pre-flight gate in front of any avatar generation. Costs nothing.
+
+        Raises :class:`AvatarUnavailableError` ONLY on a definitive "no" — an
+        undetermined probe falls through to the transport's UI gate, which
+        inspects the real Add-Media dialog and still refuses to submit when the
+        Avatar surface is absent. Two gates, and a generation reaches Flow only
+        if neither objects.
+        """
+        eligibility = await self.check_likeness_eligibility()
+        if eligibility.determined and not eligibility.eligible:
+            reasons = ", ".join(eligibility.reasons) or "unspecified"
+            raise AvatarUnavailableError(
+                f"Flow reports this account is not eligible to use its Avatar "
+                f"(likeness) for {surface} generation: {reasons}. Aborted before "
+                f"submitting — no credits were spent."
+            )
 
     async def generate_character_image(
         self,

@@ -479,6 +479,17 @@ class GenerateImageRequest:
                 "generation is prompt + likeness only"
             )
             raise ValueError(msg)
+        if self.use_avatar and self.instructions:
+            # Agent instructions are an AGENTIC-cohort surface; the avatar
+            # attach drives the CLASSIC composer's Add-Media picker, which the
+            # agentic chat UI does not render. Requiring both is unsatisfiable,
+            # so say so here rather than letting the arm bind fail mid-flow.
+            msg = (
+                "use_avatar cannot be combined with agent instructions: "
+                "instructions require the agentic Flow UI, the avatar attach "
+                "requires the classic composer"
+            )
+            raise ValueError(msg)
 
     @property
     def attaches_likeness(self) -> bool:
