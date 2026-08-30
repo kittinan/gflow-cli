@@ -1974,7 +1974,8 @@ def _print_i2i_summary(images: list[GeneratedImage], saved_paths: list[Path]) ->
         '  gflow image avatar "cinematic portrait in Bangkok"\n'
         '  gflow image avatar "on a neon rooftop" -n 4 --aspect 1:1\n\n'
         "For a local reference image use `gflow image i2i`; for a reusable saved "
-        "subject use `gflow character` + `--reference-entity` on t2i."
+        "subject create one with `gflow character` and reference it from "
+        "`gflow image t2i`."
     ),
 )
 @click.argument("prompt")

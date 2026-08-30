@@ -14,6 +14,37 @@ Living list of behaviour that's broken, surprising, or limited by design — alo
 
 ## Open
 
+### Avatar / likeness is region- and identity-gated, and its selectors are unverified
+
+- **Status:** Open (shipped with two pre-submit gates; not live-verifiable here)
+- **Severity:** Medium (fails closed — refuses rather than mis-generates) · **Affected:** `gflow image avatar`, `gflow video avatar`, `gflow video r2v --avatar`
+
+Flow's Avatar (`referenceLikenesses`) requires the one-time likeness scan on the
+Google Account **and** a permitted region. `GET /v1/flow/likeness:checkEligibility`
+returns `{"ineligibilityReasons":["REGION"]}` for every account available to this
+project, so the Avatar tab could never be opened to read its real DOM. Two
+consequences, both stated plainly rather than papered over:
+
+1. **Your account may simply not have this feature.** gflow does not claim
+   otherwise. It checks eligibility for free before generating, and inspects the
+   real media dialog when that check is inconclusive; either verdict aborts with
+   `AvatarUnavailableError` (**exit 35**) *before* the prompt is submitted, so no
+   credits are spent. gflow never falls back to a likeness-free generation.
+2. **The Avatar-tab selectors are UNVERIFIED against live Flow.** Every other
+   selector family in `ui_automation_video.py` carries a live capture date; the
+   `AVATAR_TAB_SELECTORS` cascade does not, and says so in the source. It follows
+   the same tier discipline as the verified families (structural Radix tab id →
+   icon ligature scoped to the open picker → bounded localized text), and a total
+   miss raises a typed error with the standard screenshot rather than continuing
+   toward a submit. First live run should be treated as verification, not as
+   routine use.
+
+**Workaround:** confirm the Avatar tab works in Flow's own web UI at
+<https://labs.google/fx/tools/flow> before relying on the commands. If it does
+not appear there, use [`gflow character`](USAGE.md#gflow-character) for a
+reusable subject, or `--ref <image>` for a one-off reference. Re-running will not
+change a region verdict — the error is deliberately not marked retryable.
+
 ### An out-of-range Playwright silently wedges video generation
 
 - **Status:** Mitigated (v0.49.0 — upper-bounded dependency + fail-fast watchdog)

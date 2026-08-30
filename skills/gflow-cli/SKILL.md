@@ -65,11 +65,14 @@ gflow image t2i "<prompt>" [--model {nano2|nano-pro|image4}] \
                             [--aspect {9:16|16:9|1:1|4:3|3:4}] \
                             [-n 1..4] [--out DIR]
 gflow image i2i "<prompt>" --ref PATH_OR_UUID [--ref ...] [...same as t2i]
+gflow image avatar "<prompt>" [...same as t2i, minus every --ref option]  # prompt + the ACCOUNT's Flow Avatar; region gated, see below
 gflow image batch <manifest.tsv|manifest.json> [-n 1..4] [--aspect ...] [--out DIR]  # shared project, up to 5 prompts
 
 # Video generation (Veo 3.1)
 gflow video t2v "<prompt>" [--out-dir DIR] [--aspect ...]
 gflow video i2v --initial-frame <image|media-UUID> "<prompt>" [--out-dir DIR] [...same as t2v]  # UUID = in-project asset, no re-upload (#287; pair with --project)
+gflow video r2v "<prompt>" --ref IMG [--ref IMG ...] [--avatar]   # ingredients; --avatar adds the account likeness too
+gflow video avatar "<prompt>" [...same as t2v]                    # prompt + the ACCOUNT's Flow Avatar, no image inputs
 # `gflow video` has no `batch` subcommand — that stub never worked and was
 # removed. For multi-clip runs, loop `gflow video t2v`/`i2v` from the shell.
 gflow video chain <manifest.jsonl> [--out-dir DIR] [--dry-run] \
@@ -100,6 +103,15 @@ gflow instructions toggle-mode (--on | --off) --project ID # toggle master agent
 ```
 
 Every subcommand accepts `--profile <name>` (per-subcommand, not global) to drive multiple Google accounts side-by-side.
+
+**Avatar is not universally available.** Flow gates the Avatar/likeness on
+identity verification AND region, so do not present `image avatar` / `video
+avatar` / `r2v --avatar` as something that will work for every user. gflow
+checks eligibility for free and aborts with **exit 35**
+(`AvatarUnavailableError`) *before* spending anything when the account cannot
+use it; that exit code is not retryable. When it fires, suggest `gflow
+character` (a reusable subject) or `--ref <image>` (a one-off reference)
+instead of re-running.
 
 ## Recipes
 
