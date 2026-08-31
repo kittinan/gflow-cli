@@ -1494,6 +1494,75 @@ class TestAttachCharacterEntities:
         assert escapes, "expected Escape cleanup before raising"
 
 
+class TestAttachMediaInputsEntityDispatch:
+    """Mode dispatch in `_attach_media_inputs` — the video t2v regression.
+
+    `video t2v --reference-entity <id>` and `@Name` mentions on t2v build a
+    ``Mode.T2V`` request carrying ``reference_entities`` (the DTO allows it;
+    only ``reference_images``/``ref_names`` are T2V-forbidden). The transport
+    used to attach references only for ``Mode.R2V``, so a T2V entity request
+    skipped staging entirely and died at the `_assert_entities_attached`
+    backstop with "character entities not echoed in submit response" — while
+    the identical request on `image t2i` worked. Live-verified 2026-08-31
+    (spike_t2v_entity_attach_repro, 0 credits): the Add-Media picker IS
+    rendered on the bare Video tab, `_attach_character_entities` stages the
+    entity there, and Flow's own JS re-routes the submit to
+    batchAsyncGenerateVideoReferenceImages carrying referenceEntities.
+    """
+
+    @pytest.mark.asyncio
+    async def test_t2v_reference_entities_attach_via_picker(self) -> None:
+        page = TestAttachCharacterEntities._picker_page()
+        request = GenerateVideoRequest(
+            prompt="botun standing in a bright modern room",
+            mode=Mode.T2V,
+            reference_entities=("ent-botun",),
+            reference_entity_names=("botun",),
+        )
+
+        with patch.object(
+            VideoGenerationMixin, "_attach_character_entities", new=AsyncMock()
+        ) as attach:
+            await VideoGenerationMixin._attach_media_inputs(page, request, out_dir=None)
+
+        attach.assert_awaited_once()
+        call = attach.await_args
+        assert call is not None
+        assert list(call.args[1]) == [("ent-botun", "botun")]
+
+    @pytest.mark.asyncio
+    async def test_t2v_without_entities_attaches_nothing(self) -> None:
+        page = TestAttachCharacterEntities._picker_page()
+        request = GenerateVideoRequest(prompt="a cat", mode=Mode.T2V)
+
+        with patch.object(
+            VideoGenerationMixin, "_attach_character_entities", new=AsyncMock()
+        ) as attach:
+            await VideoGenerationMixin._attach_media_inputs(page, request, out_dir=None)
+
+        attach.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_r2v_reference_entities_still_attach(self) -> None:
+        """Pin the pre-existing R2V dispatch — the fix must not disturb it."""
+        page = TestAttachCharacterEntities._picker_page()
+        request = GenerateVideoRequest(
+            prompt="botun walks",
+            mode=Mode.R2V,
+            reference_entities=("ent-botun",),
+        )
+
+        with patch.object(
+            VideoGenerationMixin, "_attach_character_entities", new=AsyncMock()
+        ) as attach:
+            await VideoGenerationMixin._attach_media_inputs(page, request, out_dir=None)
+
+        attach.assert_awaited_once()
+        call = attach.await_args
+        assert call is not None
+        assert list(call.args[1]) == [("ent-botun", "ent-botun")]
+
+
 class TestAttachReferenceAudio:
     @pytest.mark.asyncio
     async def test_attach_audio_logs_selector_tier(

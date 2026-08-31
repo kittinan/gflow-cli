@@ -26,6 +26,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is still unexplained — it now surfaces as a plain "not a git repository" rather
   than a silent branch switch.
 
+- **`gflow video t2v` never attached Character references — every entity-bearing
+  run died at the submit backstop.** `--reference-entity <id>` and `@Name`
+  mentions on `video t2v` built a valid `Mode.T2V` request carrying
+  `referenceEntities` (the DTO allows it; `image t2i` attaches the same request
+  fine), but the video transport staged references only for `Mode.R2V`, so
+  nothing was attached: no `character_entity_attached` stage, a submit on
+  `video:batchAsyncGenerateVideoText` with an empty `referenceEntities`, and
+  `_assert_entities_attached` correctly refusing the run (`WireFormatError` —
+  "character entities not echoed in submit response"). The transport now stages
+  entities for a T2V request carrying them — live-verified 2026-08-31 (0-credit
+  route-aborted capture + one real `veo-lite` generation, exit 0): the Add-Media
+  picker is rendered on the bare Video tab, the Personagens right-click include
+  stages the entity there, and Flow's own JS re-routes the submit to
+  `video:batchAsyncGenerateVideoReferenceImages` carrying the entity — no
+  ingredients sub-mode switch is needed (and none is made). `video r2v`, `i2v`,
+  and the image paths are unchanged; the backstop is untouched.
+
 ## [0.62.1] — 2026-08-30
 
 ### Fixed

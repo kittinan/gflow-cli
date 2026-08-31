@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from gflow_cli.api.image import GenerateImageRequest
-from gflow_cli.api.video import GenerateVideoRequest, VideoModel
+from gflow_cli.api.video import GenerateVideoRequest, Mode, VideoModel
 from gflow_cli.errors import ConfigurationError
 from gflow_cli.services import mentions
 from gflow_cli.services.mentions import AssetIndex, _model_str, resolve_and_apply
@@ -58,6 +58,10 @@ async def test_video_path_appends_entity_only(patch_index: None) -> None:
     out = await resolve_and_apply(None, req, path="video", project_id="proj-1", tool_specs=())
     assert out.prompt == "A Zoro walks"
     assert out.reference_entities == ("e1-uuid-12345678901234567890123456",)
+    # A mention must NOT flip the video mode: the request stays T2V and the
+    # transport stages the entity from the bare Video tab (the t2v entity
+    # regression — see TestAttachMediaInputsEntityDispatch).
+    assert out.mode is Mode.T2V
 
 
 async def test_missing_project_raises_when_mentions_present(patch_index: None) -> None:
