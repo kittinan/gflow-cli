@@ -22,6 +22,13 @@ class OperationKind(StrEnum):
     T2V = "t2v"
     I2V = "i2v"
     R2V = "r2v"
+    # Avatar/likeness generation — covers BOTH `gflow image avatar` and
+    # `gflow video avatar`. `operations.mode` is a plain TEXT column with no
+    # CHECK constraint (0001_initial.sql), so this needs no schema migration;
+    # the video path reaches it through `OperationKind(request.mode.value)`
+    # because `Mode.AVATAR.value` is the same string. `assets.kind` still
+    # distinguishes the image from the video row.
+    AVATAR = "avatar"
     SCENE_CREATE = "scene_create"
     CHARACTER = "character"
 

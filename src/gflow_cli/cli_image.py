@@ -195,6 +195,24 @@ console = Console()
 logger = structlog.get_logger(__name__)
 
 
+def _reject_agentic_ui_mode_for_avatar(ui_mode: str | None) -> None:
+    """Avatar needs the classic composer — reject an explicit agentic request.
+
+    The likeness is attached through the classic Add-Media picker, which the
+    agentic chat cohort does not render. The transport already FORCES the
+    classic requirement (so an env-set agentic is switched-and-verified rather
+    than failing oddly); rejecting the explicit flag here gives exit 2 and says
+    why, instead of exit 28's "retry may land it" — which would never be true.
+    """
+    if ui_mode == UiMode.AGENTIC.value:
+        msg = (
+            "--ui-mode agentic is not supported for avatar generation: the "
+            "likeness is attached through the classic composer's Add Media "
+            "dialog, which the agentic UI does not render. Use classic or auto."
+        )
+        raise click.UsageError(msg)
+
+
 def _warn_persistence_failed_after_success(
     *,
     exc: Exception,
@@ -1301,7 +1319,21 @@ async def _run_t2i(
     project_name: str | None = None,
     as_json: bool = False,
     tool_specs: tuple[str, ...] = (),
+    command: str = "image t2i",
+    operation_kind: OperationKind = OperationKind.T2I,
+    project_prefix: str = "gflow-t2i",
 ) -> None:
+    """Prompt-driven image generation pipeline, shared by ``t2i`` and ``avatar``.
+
+    The three trailing parameters are the ONLY things that differ between the
+    two commands: what the operation is called in the catalog and in the JSON
+    envelope, and what a freshly created scratch project is titled. Everything
+    that actually matters — project resolution and reuse, @-mention resolution,
+    tool expansion, generation, verification, download, output relocation, the
+    success recorder and the #341 failure recorder — is identical, so it is
+    shared rather than copied. ``image avatar`` differs from ``image t2i``
+    purely by ``req.use_avatar``, which the transport reads.
+    """
     settings = get_settings()
     recorder = OperationRecorder.open(settings)
     try:
@@ -1311,7 +1343,9 @@ async def _run_t2i(
             transport=transport,
             out_dir=out if out is not None else output_root,
         ) as client:
-            effective_title = project_name or slugify_project_name(req.prompt, prefix="gflow-t2i")
+            effective_title = project_name or slugify_project_name(
+                req.prompt, prefix=project_prefix
+            )
             project, project_created = await _resolve_project(
                 client, project_id=project_id, title=effective_title, as_json=as_json
             )
@@ -1348,7 +1382,7 @@ async def _run_t2i(
             if as_json:
                 json_output.emit(
                     json_output.image_result(
-                        command="image t2i",
+                        command=command,
                         project_id=project.project_id,
                         model=req.model.value,
                         images=images,
@@ -1368,7 +1402,7 @@ async def _run_t2i(
                 images=images,
                 saved_paths=saved_paths,
                 input_media_ids=[],
-                operation_kind="t2i",
+                operation_kind=operation_kind.value,
             )
     except Exception as exc:
         # #341: persist the failure before re-raising (images have no STARTED
@@ -1378,8 +1412,8 @@ async def _run_t2i(
             logger=logger,
             profile_name=profile_name,
             profile_dir=profile_dir,
-            command="image t2i",
-            mode=OperationKind.T2I,
+            command=command,
+            mode=operation_kind,
             exc=exc,
             request=req,
         )
@@ -1916,3 +1950,161 @@ def _print_i2i_summary(images: list[GeneratedImage], saved_paths: list[Path]) ->
         w, h = img.dimensions
         table.add_row(img.media_name, str(img.seed), f"{w}x{h}", safe_path_text(path))
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# avatar subcommand
+# ---------------------------------------------------------------------------
+
+
+@image.command(
+    "avatar",
+    short_help="Generate image(s) from a prompt + your Flow Avatar (likeness).",
+    help=(
+        "Avatar image generation: condition Imagen on the Avatar/likeness already "
+        "saved on your Google account. No UUID is needed — gflow selects it "
+        "through Flow's own Add Media dialog, which is what makes Flow attach "
+        "`referenceLikenesses` to the request.\n\n"
+        "AVAILABILITY: Flow gates Avatar on identity verification AND region. "
+        "gflow checks eligibility before generating and aborts with exit 35 "
+        "(no credits spent) when the account cannot use it. Confirm the Avatar "
+        "tab works in Flow's web UI first if you are unsure.\n\n"
+        "\b\n"
+        "Examples:\n"
+        '  gflow image avatar "cinematic portrait in Bangkok"\n'
+        '  gflow image avatar "on a neon rooftop" -n 4 --aspect 1:1\n\n'
+        "For a local reference image use `gflow image i2i`; for a reusable saved "
+        "subject create one with `gflow character` and reference it from "
+        "`gflow image t2i`."
+    ),
+)
+@click.argument("prompt")
+@click.option(
+    "--model",
+    default=_DEFAULT_MODEL,
+    show_default=True,
+    type=click.Choice(_ALLOWED_MODELS),
+    help="Image model alias.",
+)
+@click.option(
+    "--aspect",
+    default=_DEFAULT_ASPECT_RATIO,
+    show_default=True,
+    type=click.Choice(_ALLOWED_ASPECT_RATIOS),
+    help="Image aspect ratio.",
+)
+@click.option(
+    "-n",
+    "--count",
+    "count",
+    default=_DEFAULT_COUNT,
+    show_default=True,
+    type=click.IntRange(_MIN_COUNT, _MAX_COUNT),
+    help=f"How many images to generate ({_MIN_COUNT}-{_MAX_COUNT}).",
+)
+@click.option(
+    "--out",
+    "out",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help=(
+        "Directory to write generated PNGs. When omitted, files land under "
+        "<output_dir>/images/<YYYY-MM-DD>/ (date-partitioned)."
+    ),
+)
+@click.option(
+    "-o",
+    "--output",
+    "output_file",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Explicit output file path for the generated asset.",
+)
+@click.option("--profile", default=None, help="Profile name (overrides default).")
+@tool_option
+@click.option(
+    "--transport",
+    type=click.Choice(transport_choices(), case_sensitive=False),
+    default=None,
+    help=(
+        "Override transport strategy. Falls back to GFLOW_CLI_TRANSPORT env var "
+        "or built-in default (ui_automation)."
+    ),
+)
+@click.option(
+    "--project",
+    "project_id",
+    default=None,
+    callback=_validate_project_id,
+    help="Generate in this existing Flow project id instead of creating a scratch project.",
+)
+@click.option(
+    "--project-name",
+    "--project-title",
+    "project_name",
+    default=None,
+    help="Human-readable project title to use when creating a fresh Flow project.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit a machine-readable JSON result instead of a Rich table.",
+)
+@_ui_mode_option
+def avatar(
+    prompt: str,
+    model: str,
+    aspect: str,
+    count: int,
+    out: Path | None,
+    output_file: Path | None,
+    profile: str | None,
+    tool_specs: tuple[str, ...],
+    transport: str | None,
+    project_id: str | None,
+    project_name: str | None,
+    as_json: bool,
+    ui_mode: str | None,
+) -> None:
+    """Generate image(s) from PROMPT + your Flow Avatar.
+
+    Deliberately carries no ``--ref`` / ``--reference-entity``: the DTO refuses
+    to mix the likeness with any other reference kind (no capture proves Flow
+    accepts the combination on the image route), so advertising the flags would
+    advertise a guaranteed error.
+    """
+    _reject_agentic_ui_mode_for_avatar(ui_mode)
+    profile_name = _resolve_profile(profile)
+    provider_dir = _make_provider_dir(profile_name)
+    settings = get_settings()
+    run_with_handlers(
+        lambda: _run_t2i(
+            profile_name=profile_name,
+            profile_dir=provider_dir,
+            headless=settings.headless,
+            req=GenerateImageRequest(
+                prompt=prompt,
+                aspect=Aspect.from_cli(aspect),
+                model=Model.from_cli(model),
+                use_avatar=True,
+                original_prompt=None,
+                tool=None,
+                ui_mode=UiMode(ui_mode) if ui_mode else None,
+            ),
+            count=count,
+            out=out,
+            output_file=output_file,
+            output_root=settings.output_dir,
+            transport=transport,
+            project_id=project_id,
+            project_name=project_name,
+            as_json=as_json,
+            tool_specs=tool_specs,
+            command="image avatar",
+            operation_kind=OperationKind.AVATAR,
+            project_prefix="gflow-avatar",
+        ),
+        cli_command="image avatar",
+        as_json=as_json,
+    )

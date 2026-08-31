@@ -74,6 +74,18 @@ _reference_entity_name_option = click.option(
     help="Display name paired with --reference-entity.",
 )
 
+_avatar_option = click.option(
+    "--avatar",
+    "use_avatar",
+    is_flag=True,
+    default=False,
+    help=(
+        "Also attach your Flow Avatar (likeness) to this generation. Requires an "
+        "account whose region and identity verification allow Avatar; gflow "
+        "checks eligibility first and aborts before spending credits if not."
+    ),
+)
+
 
 def _warn_persistence_failed_after_success(
     *,
@@ -590,6 +602,7 @@ async def _run_r2v(
     project_id: str | None = None,
     project_name: str | None = None,
     tool_specs: tuple[str, ...] = (),
+    use_avatar: bool = False,
 ) -> None:
     from gflow_cli.api.video import Aspect, GenerateVideoRequest, Mode, VideoModel
 
@@ -606,6 +619,7 @@ async def _run_r2v(
         reference_entity_names=reference_entity_names,
         original_prompt=original_prompt,
         tool=tool,
+        use_avatar=use_avatar,
     )
 
     await _generate_and_report(
@@ -615,6 +629,61 @@ async def _run_r2v(
         out_dir=out_dir,
         output_file=output_file,
         command="video r2v",
+        as_json=as_json,
+        project_id=project_id,
+        project_name=effective_title,
+        tool_specs=tool_specs,
+    )
+
+
+async def _run_avatar_video(
+    *,
+    profile_name: str,
+    profile_dir: Path,
+    prompt: str,
+    aspect: str,
+    out_dir: Path | None,
+    model: str | None = None,
+    duration: int | None = None,
+    count: int = 1,
+    output_file: Path | None = None,
+    as_json: bool = False,
+    original_prompt: str | None = None,
+    tool: AppliedTool | None = None,
+    project_id: str | None = None,
+    project_name: str | None = None,
+    tool_specs: tuple[str, ...] = (),
+    ui_mode: UiMode | None = None,
+) -> None:
+    """Pure avatar video: prompt + the account likeness, no image inputs.
+
+    Deliberately thin — it builds ``Mode.AVATAR`` and hands off to the SAME
+    ``_generate_and_report`` every other video command uses, so project reuse,
+    @-mention resolution, tool expansion, output relocation, JSON emission and
+    both recorder paths are inherited rather than reimplemented.
+    """
+    from gflow_cli.api.video import Aspect, GenerateVideoRequest, Mode, VideoModel
+
+    effective_title = project_name or slugify_project_name(prompt, prefix="gflow-avatar")
+    request = GenerateVideoRequest(
+        prompt=prompt,
+        mode=Mode.AVATAR,
+        aspect=Aspect.from_cli(aspect),
+        model=VideoModel.from_cli(model),
+        duration=duration,
+        count=count,
+        original_prompt=original_prompt,
+        tool=tool,
+        ui_mode=ui_mode,
+    )
+
+    await _generate_and_report(
+        request,
+        profile_name=profile_name,
+        profile_dir=profile_dir,
+        out_dir=out_dir,
+        output_file=output_file,
+        command="video avatar",
         as_json=as_json,
         project_id=project_id,
         project_name=effective_title,
@@ -1406,7 +1475,9 @@ def i2v(  # NOSONAR
         '  gflow video r2v "knight walks forward" --ref armor.png --model omni-flash\n'
         '  gflow video r2v "they meet" --ref a.png --ref b.png --model veo-fast\n\n'
         "Tag a saved character by name inline with @Name (--ref stays for one-off "
-        "ingredient images). See docs/REFERENCE_STRATEGIES.md."
+        "ingredient images). See docs/REFERENCE_STRATEGIES.md.\n\n"
+        "Add --avatar to put your Flow Avatar (likeness) in the scene alongside "
+        "the reference images."
     ),
 )
 @click.argument("prompt")
@@ -1457,6 +1528,7 @@ def i2v(  # NOSONAR
 @_project_name_option
 @_reference_entity_option
 @_reference_entity_name_option
+@_avatar_option
 @click.option(
     "-o",
     "--output",
@@ -1491,6 +1563,7 @@ def r2v(
     project_name: str | None,
     reference_entities: tuple[str, ...],
     reference_entity_names: tuple[str, ...],
+    use_avatar: bool,
     output_file: Path | None,
     out_dir: Path | None,
     as_json: bool,
@@ -1540,8 +1613,133 @@ def r2v(
             project_id=project_id,
             project_name=project_name,
             tool_specs=tool_specs,
+            use_avatar=use_avatar,
         ),
         cli_command="video r2v",
+        as_json=as_json,
+    )
+
+
+def _reject_avatar_model_without_references(model: str | None) -> None:
+    """Reject a --model that offers no references/ingredients workflow (exit 2).
+
+    Attaching the likeness requires the editor's References sub-mode, and a
+    model whose reference cap is 0 (veo-quality) never renders it. The DTO
+    enforces the same invariant, but a bare ``ValueError`` surfaces through the
+    CLI as "Unexpected error." (exit 1) and the reason is lost — same treatment
+    ``--duration`` and ``--ui-mode agentic`` already get.
+    """
+    if model is None:
+        return
+    try:
+        resolved = VideoModel.from_cli(model)
+    except ValueError:
+        return  # click.Choice already rejected it on the CLI path
+    if resolved is not None and reference_cap_for(resolved) == 0:
+        msg = (
+            f"--model {model} cannot be used with the avatar: it does not support "
+            f"Flow's references/ingredients workflow, which the likeness attach "
+            f"requires. Use omni-flash, veo-lite, veo-fast, or veo-lite-lp."
+        )
+        raise click.UsageError(msg)
+
+
+@video.command(
+    "avatar",
+    short_help="Generate a video from a prompt + your Flow Avatar (likeness).",
+    help=(
+        "Avatar video: condition a generation on the Avatar/likeness already "
+        "saved on your Google account. No UUID is needed — gflow selects it "
+        "through Flow's own Add Media dialog, which is what makes Flow attach "
+        "`referenceLikenesses` to the request.\n\n"
+        "AVAILABILITY: Flow gates Avatar on identity verification AND region. "
+        "gflow checks eligibility before generating and aborts with exit 35 "
+        "(no credits spent) when the account cannot use it. Confirm the Avatar "
+        "tab works in Flow's web UI first if you are unsure.\n\n"
+        "\b\n"
+        "Examples:\n"
+        '  gflow video avatar "walking through Bangkok at night"\n'
+        '  gflow video avatar "cinematic walk" --model omni-flash --duration 8\n\n'
+        "For avatar + reference images, use `gflow video r2v --ref x.png --avatar`."
+    ),
+)
+@click.argument("prompt")
+@click.option(
+    "--aspect",
+    default="9:16",
+    show_default=True,
+    type=click.Choice(["9:16", "16:9"]),
+    help="Video aspect ratio (portrait 9:16 or landscape 16:9).",
+)
+@click.option(
+    "--model",
+    default=None,
+    type=click.Choice(["omni-flash", "veo-lite", "veo-fast", "veo-quality", "veo-lite-lp"]),
+    help=(
+        "Veo model. Omit to use Flow's current default. veo-quality is rejected: "
+        "it has no references/ingredients workflow, which the avatar attach needs."
+    ),
+)
+@click.option(
+    "--duration",
+    default=None,
+    type=click.Choice(["4", "6", "8", "10"]),
+    help=(
+        "Clip length in seconds. REQUIRES --model omni-flash: the Veo 3.1 "
+        "models render no duration control in Flow, so no length can be "
+        "selected for them (refs #451/#288). Omit for Flow's default length."
+    ),
+)
+@click.option(
+    "--count",
+    default=1,
+    show_default=True,
+    type=click.IntRange(1, 4),
+    help="How many videos to generate (1-4). >1 multiplies credit cost.",
+)
+@_ui_mode_option
+@_shared_gen_tail_options
+def avatar(
+    prompt: str,
+    aspect: str,
+    model: str | None,
+    duration: str | None,
+    count: int,
+    ui_mode: str | None,
+    profile: str | None,
+    tool_specs: tuple[str, ...],
+    project_id: str | None,
+    project_name: str | None,
+    out_dir: Path | None,
+    output_file: Path | None,
+    as_json: bool,
+) -> None:
+    """Generate a video from PROMPT + your Flow Avatar."""
+    _reject_agentic_ui_mode(ui_mode)
+    _reject_duration_without_control(model, duration)
+    _reject_avatar_model_without_references(model)
+    profile_name = _resolve_profile(profile)
+    provider_dir = _make_provider_dir(profile_name)
+    run_with_handlers(
+        lambda: _run_avatar_video(
+            profile_name=profile_name,
+            profile_dir=provider_dir,
+            prompt=prompt,
+            aspect=aspect,
+            out_dir=out_dir,
+            output_file=output_file,
+            model=model,
+            duration=int(duration) if duration is not None else None,
+            count=count,
+            as_json=as_json,
+            original_prompt=None,
+            tool=None,
+            project_id=project_id,
+            project_name=project_name,
+            tool_specs=tool_specs,
+            ui_mode=UiMode(ui_mode) if ui_mode else None,
+        ),
+        cli_command="video avatar",
         as_json=as_json,
     )
 

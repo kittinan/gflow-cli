@@ -21,6 +21,22 @@ task payload, which the daemon decodes and relocates the artifact to
 param that the queue never read; the docstring here claimed that state long
 after the real wiring shipped (#495).
 
+Note on ``--avatar`` / the ``image avatar`` + ``video avatar`` leaves: both
+leaves are EXEMPT, and ``video r2v --avatar`` is intentionally NOT mirrored on
+``gflow_generate_video``. Flow's Avatar is verified-identity AND region gated
+(``likeness:checkEligibility`` answers ``["REGION"]`` on this project's own
+accounts, docs/CHARACTER.md), so the capability could not be exercised
+end-to-end before shipping. Exposing an unverified, region-gated,
+credit-spending path on the agent-facing surface — where a model calls it
+speculatively rather than a human typing it deliberately — is the wrong
+default; the CLI keeps it behind an explicit human invocation until a live run
+confirms the attach. The upgrade path is mechanical when that happens: add
+``avatar: bool`` to ``gflow_generate_video``/``gflow_generate_image``, thread
+``use_avatar`` through ``_build_video_payload`` (the worker codec already
+decodes it), add ``"avatar"`` to the daemon's video task-type branch, and move
+these two leaves into ``CLI_TO_MCP``. ``--no-spend`` needs no work either way:
+it removes both generate tools from the registry wholesale.
+
 Note on ``image t2i --jitter`` (#241): intentionally NOT mirrored on
 ``gflow_generate_image``. The jitter paces submissions *between prompts* in a
 multi-prompt run; the MCP tool is single-prompt, so the parameter would be a
@@ -87,9 +103,17 @@ _MCP_EXEMPT: dict[str, str] = {
     "data prune": "destructive local cleanup — deliberately CLI-only",
     "data sync": "browser-driving reconciliation; MCP exposure deferred (#543)",
     "doctor": "interactive diagnostic; MCP tool deferred (#542)",
+    "image avatar": (
+        "Avatar/likeness is verified-identity + region gated and could not be "
+        "live-verified before shipping; held off the agent surface deliberately"
+    ),
     "image batch": "batch pipelines — not yet ported",
     "image upload": "asset upload — covered indirectly by reference_images paths",
     "image upscale": "not yet ported",
+    "video avatar": (
+        "Avatar/likeness is verified-identity + region gated and could not be "
+        "live-verified before shipping; held off the agent surface deliberately"
+    ),
     "video chain": "chain pipeline — not yet ported",
     "movie run": "movie pipeline — not yet ported (skills-audit Task 7 backlog)",
     "movie template": "movie pipeline — not yet ported (skills-audit Task 7 backlog)",

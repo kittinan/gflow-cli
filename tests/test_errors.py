@@ -11,6 +11,7 @@ from gflow_cli.errors import (
     AuthBrowserRejectedError,
     AuthExpiredError,
     AuthMissingError,
+    AvatarUnavailableError,
     BrowserEngineUnavailableError,
     ChainPartialError,
     ConfigurationError,
@@ -30,6 +31,7 @@ from gflow_cli.errors import (
     VideoModelSelectionError,
     WafRejectionError,
     WireFormatError,
+    is_retryable,
 )
 
 # ---------- parametrized to_problem_details() round-trip table ----------
@@ -198,6 +200,22 @@ def test_upscale_unavailable_error_exit_code_22():
     assert not isinstance(err, WafRejectionError)
     assert EXIT_CODE_MAP[UpscaleUnavailableError] == 22
     assert next(code for cls, code in EXIT_CODE_MAP.items() if isinstance(err, cls)) == 22
+
+
+def test_avatar_unavailable_error_exit_code_35():
+    """Flow's Avatar is verified-identity + region gated, so "your account
+    cannot use Avatar" is a DIFFERENT answer from "the UI drifted" (23): one is
+    unfixable by any gflow release, the other is exactly what a release fixes.
+    Exit 35 lets a script tell them apart, and the error must not be advertised
+    as retryable — a region verdict answers identically on a re-run.
+    """
+    err = AvatarUnavailableError(detail="account not eligible: REGION")
+    assert isinstance(err, GFlowError)
+    assert not isinstance(err, UiSelectorDriftError)
+    assert EXIT_CODE_MAP[AvatarUnavailableError] == 35
+    assert _exit_code_for(err) == 35
+    assert not is_retryable(err)
+    assert len(err.to_problem_details()["remediation_hint"]) > 10
 
 
 def test_exit_code_map_ordering_invariant():

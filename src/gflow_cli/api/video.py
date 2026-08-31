@@ -30,6 +30,21 @@ class Mode(StrEnum):
     T2V = "t2v"
     I2V = "i2v"
     R2V = "r2v"
+    # AVATAR = prompt + the account's own Flow Avatar/likeness, with NO image
+    # inputs of any kind. It is a distinct Mode rather than a flag on T2V for
+    # three reasons that all bite at once:
+    #   * the transport must switch the editor into the References/Ingredients
+    #     sub-mode (the Add-Media button is not rendered on the bare Video tab),
+    #     which is a per-mode decision the classic driver already makes;
+    #   * `OperationKind(request.mode.value)` is how every video operation is
+    #     recorded, so a T2V-shaped avatar run would be catalogued as `t2v` and
+    #     lose its provenance; and
+    #   * "plain T2V must reject an avatar flag" is only expressible if T2V and
+    #     avatar are different modes.
+    # Avatar + reference images is NOT this mode — that is `Mode.R2V` with
+    # ``use_avatar=True`` (Flow carries `referenceLikenesses` alongside
+    # `referenceImages` in one request).
+    AVATAR = "avatar"
 
 
 class Tier(StrEnum):
@@ -305,17 +320,109 @@ class GenerateVideoRequest:
     # The video pipeline clamps to classic-required (no agentic video driver
     # exists); see _generate_video_locked.
     ui_mode: UiMode | None = None
+    # Attach the account's Flow Avatar/likeness through the editor's Add-Media
+    # dialog. gflow never forges `referenceLikenesses` itself — the UI click is
+    # what makes Flow's own JS put it on the wire.
+    #
+    # SINGLE source of truth for "this request wants the likeness": ``Mode.AVATAR``
+    # NORMALISES this to True in __post_init__ (see :meth:`_normalise_avatar`), so
+    # the pair can never disagree and there is no reachable
+    # ``Mode.AVATAR + use_avatar=False`` state. Valid on ``Mode.R2V`` (references
+    # + likeness); REJECTED on ``Mode.T2V`` and ``Mode.I2V``.
+    use_avatar: bool = False
 
     def __post_init__(self) -> None:
+        self._normalise_avatar()
         self._validate_prompt()
         self._validate_duration()
         self._validate_count()
         self._validate_frame_ref_ids()
         self._validate_mode_symmetry()
+        self._validate_avatar()
         self._validate_r2v_caps()
         self._validate_model_capabilities()
         self._validate_seed()
         self._validate_ui_mode()
+
+    def _normalise_avatar(self) -> None:
+        """``Mode.AVATAR`` implies the likeness — collapse the two-field state.
+
+        Done as normalisation rather than validation on purpose: rejecting
+        ``Mode.AVATAR + use_avatar=False`` would make callers repeat themselves,
+        while ACCEPTING it would leave an avatar mode that attaches nothing.
+        Forcing the flag makes the invalid combination unrepresentable, so every
+        downstream branch can read one field (:attr:`attaches_likeness`).
+        """
+        if self.mode is Mode.AVATAR and not self.use_avatar:
+            object.__setattr__(self, "use_avatar", True)
+
+    @property
+    def attaches_likeness(self) -> bool:
+        """True when the transport must attach the account Avatar/likeness.
+
+        The one predicate the driver, the transport and the recorder branch on,
+        so "pure avatar" and "r2v + avatar" cannot drift apart across the three.
+        """
+        return self.use_avatar
+
+    def _validate_avatar(self) -> None:
+        """Avatar is only expressible on ``Mode.AVATAR`` and ``Mode.R2V``.
+
+        * ``Mode.T2V`` — a plain text-to-video request that also carries an avatar
+          flag is a caller bug, not a request Flow can serve: T2V never enters the
+          References sub-mode, so the likeness would be silently dropped and the
+          user would be billed for a generation that ignored their subject.
+        * ``Mode.I2V`` — Flow's own UI does not offer the Avatar surface once the
+          composer is in the Frames sub-mode, and no capture proves a start/end
+          frame can coexist with ``referenceLikenesses``. Refused rather than
+          guessed; if a future capture proves the combination, relax THIS branch
+          (and only this branch) with the evidence in the commit.
+        * ``Mode.AVATAR`` — pure: prompt + likeness, no image inputs at all. The
+          frame/reference exclusions live here rather than in
+          ``_validate_mode_symmetry`` so the message can name the R2V escape hatch.
+        """
+        if self.use_avatar and self.mode is Mode.T2V:
+            msg = (
+                "T2V request must not carry use_avatar; use Mode.AVATAR for a "
+                "prompt + avatar video, or Mode.R2V with use_avatar=True to "
+                "combine reference images with the avatar"
+            )
+            raise ValueError(msg)
+        if self.use_avatar and self.mode is Mode.I2V:
+            msg = (
+                "I2V request must not carry use_avatar: Flow does not expose the "
+                "Avatar surface in the Frames sub-mode, and no capture proves a "
+                "start/end frame can coexist with referenceLikenesses"
+            )
+            raise ValueError(msg)
+        if self.mode is not Mode.AVATAR:
+            return
+        if self._has_frame_input():
+            msg = "AVATAR request must not carry start/end images"
+            raise ValueError(msg)
+        if self.reference_images or self.ref_names or self.reference_entities:
+            msg = (
+                "AVATAR request must not carry reference images, ref names, or "
+                "reference entities; use Mode.R2V with use_avatar=True to combine "
+                "references with the avatar"
+            )
+            raise ValueError(msg)
+        # Attaching the likeness requires the editor's References/Ingredients
+        # sub-mode (the Add-Media button is not rendered on the bare Video tab —
+        # this is exactly what the 2026-07-01 fix on the source branch found).
+        # A model with a reference cap of 0 does not offer that workflow at all,
+        # so the sub-mode switch would fail mid-flow as selector drift. Reuse the
+        # SAME cap predicate R2V uses rather than a second "supports ingredients?"
+        # rule — one source of truth (see reference_cap_for's docstring).
+        # ``model is None`` leaves Flow's sticky UI default in play and is
+        # genuinely unknowable here, exactly as for t2v/r2v.
+        if self.model is not None and reference_cap_for(self.model) == 0:
+            msg = (
+                f"{self.model.value} does not support the references/ingredients "
+                f"workflow the avatar attach requires; choose a model that does "
+                f"(e.g. omni_flash, veo_3_1_lite, veo_3_1_fast)"
+            )
+            raise ValueError(msg)
 
     def _has_frame_input(self) -> bool:
         """True when the request carries an i2v start/end frame in any form."""

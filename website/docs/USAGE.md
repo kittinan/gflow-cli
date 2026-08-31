@@ -22,11 +22,13 @@ Commands:
     upload                      Upload a local image and print its asset UUID.
     t2i                         Generate 1-4 images from a text prompt.
     i2i                         Generate 1-4 images from a prompt + reference(s).
+    avatar                      Generate 1-4 images from a prompt + your Flow Avatar.
 
   video     Video generation (Veo via Flow).
     t2v                         Generate a video from a text prompt.
     i2v                         Generate a video from an initial frame + motion prompt.
     r2v                         Generate a video from reference images + prompt.
+    avatar                      Generate a video from a prompt + your Flow Avatar.
     chain                       Render a JSONL manifest as a last-frame I2V chain.
 
   scene     Compose Flow Scenes (Add Clip) — credit-free REST.
@@ -61,8 +63,9 @@ Global flags:
 - `-V`, `--version` — print version and exit.
 - `-v`, `--verbose` — log at DEBUG level.
 
-Machine-readable output: the generation commands (`image t2i` / `image i2i`,
-`video t2v` / `i2v` / `r2v`), `auth list`, and `gflow models` accept `--json` to
+Machine-readable output: the generation commands (`image t2i` / `image i2i` /
+`image avatar`, `video t2v` / `i2v` / `r2v` / `avatar`), `auth list`, and
+`gflow models` accept `--json` to
 emit a single parseable object on stdout instead of Rich tables. See
 [§ JSON output](#json-output---json).
 
@@ -349,6 +352,42 @@ A 2-image run produces files numbered `_1.png`, `_2.png`:
 ./variants/<media_name_b>_2.png
 ```
 
+## `gflow image avatar`
+
+Generate 1–4 images from a text prompt **plus the Avatar (likeness) already
+saved on your Google account**. You do not supply a UUID: gflow selects the
+Avatar through Flow's own Add Media dialog, and Flow's page JavaScript is what
+puts `referenceLikenesses` on the request.
+
+> **Availability:** Flow gates Avatar on identity verification **and** region.
+> This is not a universal feature — see
+> [§ Avatar availability](#avatar-availability-region-and-account-eligibility)
+> before you rely on it.
+
+```text
+gflow image avatar PROMPT [--model] [--aspect] [-n/--count] [--out] [-o/--output]
+                          [--profile] [--transport] [--project] [--project-name]
+                          [--tool] [--ui-mode] [--json]
+```
+
+```bash
+gflow image avatar "cinematic portrait in Bangkok"
+gflow image avatar "on a neon rooftop" -n 4 --aspect 1:1
+```
+
+The flag set is `t2i`'s, minus the reference options. `--ref`,
+`--reference-entity` and `-i/--instruction` are deliberately **absent**: the
+request model refuses to mix the likeness with another reference kind (there is
+no captured payload proving Flow accepts the combination on the image route),
+and instructions require the agentic UI while the Avatar attach requires the
+classic composer. For a local reference image use
+[`gflow image i2i`](#gflow-image-i2i); for a reusable saved subject use
+[`gflow character`](#gflow-character).
+
+Operations are recorded in the local catalog under the `avatar` kind, so
+`gflow data list images` and the operations history keep avatar runs
+distinguishable from plain `t2i`.
+
 ## Character-consistent images (entity references)
 
 `--reference-entity` makes `image t2i`/`i2i` reference a locked Flow **CHARACTER
@@ -628,6 +667,76 @@ Options:
 gflow video r2v "a knight in this armor walks forward" --ref armor.png
 gflow video r2v "blend these worlds" --ref a.png --ref b.png --ref c.png --model omni-flash
 ```
+
+### Adding your Avatar to an r2v generation
+
+`--avatar` attaches your Flow Avatar (likeness) **alongside** the reference
+images, in one generation — Flow carries `referenceLikenesses` and
+`referenceImages` together:
+
+```bash
+gflow video r2v "walking with the referenced subjects" --ref subject.png --avatar
+```
+
+The per-model reference cap is unchanged: the Avatar is not an ingredient and
+does not consume a reference slot, but it does not raise the cap either.
+
+## `gflow video avatar`
+
+Generate a video from a text prompt **plus the Avatar (likeness) saved on your
+Google account**, with no image inputs at all. As with `image avatar`, no UUID
+is needed — gflow drives Flow's Add Media dialog and Flow's own JavaScript
+builds the request.
+
+```text
+gflow video avatar PROMPT [--aspect] [--model] [--duration] [--count]
+                          [--profile] [--project] [--project-name] [--tool]
+                          [--out-dir] [-o/--output] [--ui-mode] [--json]
+```
+
+```bash
+gflow video avatar "walking through Bangkok at night"
+gflow video avatar "cinematic walk" --model omni-flash --duration 8
+```
+
+Notes:
+
+- Attaching the likeness requires Flow's References/Ingredients sub-mode (the
+  Add Media button is not rendered on the bare Video tab), so **`--model
+  veo-quality` is rejected** — it offers no ingredients workflow. Use
+  `omni-flash`, `veo-lite`, `veo-fast` or `veo-lite-lp`, or omit `--model` to
+  accept Flow's current default.
+- `--duration` still requires `--model omni-flash` (the Veo 3.1 models render no
+  duration control — see [`gflow video t2v`](#gflow-video-t2v)).
+- Frames and reference images are rejected: this mode is prompt + likeness only.
+  For Avatar together with reference images use `gflow video r2v --avatar`.
+- Operations are recorded under the `avatar` kind.
+
+## Avatar availability (region and account eligibility)
+
+Flow's Avatar/likeness is **verified-identity and region gated by Google**. It
+requires the one-time avatar scan on your Google Account, and it is not offered
+in every region: `GET /v1/flow/likeness:checkEligibility` returns
+`{"ineligibilityReasons": ["REGION"]}` for the accounts this project was
+developed against. gflow makes no claim that your account can use it.
+
+What gflow does about it:
+
+1. **Pre-flight.** Before generating, gflow calls the free eligibility endpoint.
+   A definitive "not eligible" aborts with **exit 35**
+   (`AvatarUnavailableError`) — no reCAPTCHA token minted, no credits spent.
+2. **Media-dialog gate.** If the pre-flight answer is inconclusive (a network
+   blip, an unrecognised response shape), gflow opens Flow's Add Media dialog
+   and looks for the Avatar tab. Other tabs present but no Avatar tab is also
+   exit 35, still **before** the prompt is submitted.
+3. **No silent degradation.** gflow never falls back to a plain t2i/t2v
+   generation without the likeness. If the Avatar cannot be attached, nothing is
+   submitted.
+
+If you hit exit 35, confirm the Avatar tab works in Flow's own web UI at
+<https://labs.google/fx/tools/flow> first. If it does not, use
+[`gflow character`](#gflow-character) for a reusable subject or `--ref` for a
+one-off reference image instead; re-running will not change a region verdict.
 
 ### Sharing one project across calls
 
@@ -1522,6 +1631,7 @@ shell scripts can branch on the failure mode without parsing stderr.
 | `32` | `ReferenceNotFoundError` | A referenced media NAME is not in this project's picker. Flow indexes a short auto-caption, not the generation prompt, so a prompt used as a reference name never matches | Reference the asset by its media UUID, pass a local file with `--ref`, or check what exists with `gflow data list images` |
 | `33` | — (`gflow doctor` verdict) | Doctor found warn/fail findings — a successful diagnosis, not an error class | Review the report; see [`gflow doctor`](#gflow-doctor) |
 | `34` | `SyncPartialError`    | `gflow data sync` failed on some projects but succeeded on others — completed writes stay committed | Retryable: re-run the same command; it resumes with what is still nameless (see [`gflow data sync`](#gflow-data-sync)) |
+| `35` | `AvatarUnavailableError` | Flow's Avatar/likeness is not usable on this account — identity-verification / region gate. Raised BEFORE any submit, so nothing was spent | NOT retryable: a region verdict is the same on a re-run. Confirm the Avatar tab works in Flow's web UI; otherwise use [`gflow character`](#gflow-character) or `--ref` (see [§ Avatar availability](#avatar-availability-region-and-account-eligibility)) |
 | `130`| SIGINT                | User-interrupted (Ctrl-C)                        | —                                                          |
 
 **Exit code 16 — data store / migration error.** Fires when:

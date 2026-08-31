@@ -64,6 +64,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Avatar / likeness generation: `gflow image avatar`, `gflow video avatar`, and
+  `gflow video r2v --avatar`.** Conditions a generation on the Avatar already saved
+  on your Google account — no UUID to look up. gflow drives Flow's own Add Media
+  dialog so Flow's page JavaScript emits `referenceLikenesses`; no payload is
+  forged. Pure avatar video enters the References/Ingredients sub-mode first (the
+  Add Media button is not rendered on the bare Video tab), and `r2v --avatar`
+  attaches the reference images and the likeness in one generation. Avatar
+  operations are recorded in the local catalog under a new `avatar` operation kind
+  (no schema migration — `operations.mode` is unconstrained TEXT).
+
+  **Availability is not universal, and gflow does not pretend otherwise.** Flow
+  gates Avatar on identity verification *and* region;
+  `likeness:checkEligibility` answers `["REGION"]` for the accounts this project
+  was developed against. Two gates run before anything can be spent: a free
+  pre-flight eligibility read, then — if that is inconclusive — an inspection of
+  the real media dialog. Either verdict aborts with the new
+  `AvatarUnavailableError` (**exit 35**, deliberately not retryable) *before* the
+  prompt is submitted. gflow never silently degrades to a likeness-free t2i/t2v.
+  See [USAGE § Avatar availability](docs/USAGE.md#avatar-availability-region-and-account-eligibility).
+
+  Validation happens at request construction, before a browser opens: plain t2v
+  and i2v reject an avatar flag, pure avatar rejects every image input, image
+  avatar rejects every other reference kind (no capture proves Flow accepts the
+  combination), and a model with no ingredients workflow (`veo-quality`) is
+  rejected because the attach needs that sub-mode.
+
+  MCP is intentionally not extended: the capability is region gated and could not
+  be live-verified, so it stays behind a deliberate human invocation for now. The
+  exemption and its mechanical upgrade path are recorded in
+  `tests/mcp/test_cli_parity.py`.
+
 - **[`docs/ACCOUNT_SAFETY.md`](docs/ACCOUNT_SAFETY.md) — one honest page answering
   "will this get my account flagged?"
   ([#602](https://github.com/ffroliva/gflow-cli/issues/602)).** Two Reddit

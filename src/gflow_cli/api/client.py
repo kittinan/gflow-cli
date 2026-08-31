@@ -45,6 +45,7 @@ from gflow_cli.api.dto import (
     GeneratedImage,
     GenerationCheckpoint,
     GenerationCheckpointObserver,
+    LikenessEligibility,
     ProjectInfo,
 )
 from gflow_cli.api.image_upscale import (
@@ -74,6 +75,7 @@ from gflow_cli.errors import (
     AisandboxAuthError,
     AuthExpiredError,
     AuthMissingError,
+    AvatarUnavailableError,
     BrowserSessionClosedError,
     ConfigurationError,
     ContentPolicyError,
@@ -457,6 +459,11 @@ class FlowApiClient:
                 "--password-store=basic",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
+                # VirtualGL: Chrome's GPU sandbox blocks VGL from cloning the X
+                # display connection to the 3D X server, crashing the GPU process
+                # (exit 256) into software rendering. Added only under vglrun
+                # (VGL_ISACTIVE=1) so hardware GPU acceleration works; inert otherwise.
+                *(["--disable-gpu-sandbox"] if os.environ.get("VGL_ISACTIVE") == "1" else []),
             ],
         }
         if self.settings.har_path is not None:
@@ -2122,6 +2129,11 @@ class FlowApiClient:
             raise RuntimeError(
                 msg,
             )
+        # Avatar pre-flight BEFORE the reCAPTCHA mint: an ineligible account
+        # should not burn a token (or the WAF heat that minting one costs) on a
+        # request that can never succeed.
+        if req.attaches_likeness:
+            await self._require_likeness_eligibility(surface="image")
         token = await self._mint_recaptcha_token(recaptcha_action)
         req_with_token = _dc_replace(req, recaptcha_token=token)
         if on_checkpoint is not None:
@@ -2329,6 +2341,10 @@ class FlowApiClient:
             raise RuntimeError(
                 msg,
             )
+
+        # Avatar pre-flight (free Bearer read) before anything that could spend.
+        if req.attaches_likeness:
+            await self._require_likeness_eligibility(surface="video")
 
         wrapped_on_started = on_started
         if on_checkpoint is not None:
@@ -2612,6 +2628,65 @@ class FlowApiClient:
             project_id=project_id,
             count=len(entity_ids),
         )
+
+    async def check_likeness_eligibility(self) -> LikenessEligibility:
+        """Ask Flow whether this account may use its Avatar/likeness. FREE.
+
+        ``GET /v1/flow/likeness:checkEligibility`` is a Bearer-REST read — no
+        reCAPTCHA, no credits, no browser dialog — so it is the cheapest possible
+        gate in front of an avatar generation.
+
+        NEVER raises for an inconclusive answer: any transport/parse failure
+        returns :meth:`LikenessEligibility.undetermined`, and the caller falls
+        through to the UI gate (which opens the Add-Media dialog and refuses to
+        submit if the Avatar surface is absent). Turning a wire hiccup into a
+        hard refusal would break working accounts; turning it into an assumed
+        "eligible" would spend credits on a generation that drops the likeness —
+        the third state exists so neither happens.
+
+        Auth failures are the one exception worth surfacing: an expired session
+        is an actionable, non-avatar problem the user must fix either way, and
+        the very next call would raise it anyway.
+        """
+        try:
+            data = await self._get_json(
+                routes.LIKENESS_CHECK_ELIGIBILITY,
+                route_name="likeness:checkEligibility",
+            )
+        except AuthExpiredError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — inconclusive, not fatal
+            logger.info(
+                "likeness.eligibility_undetermined",
+                error_class=type(exc).__name__,
+            )
+            return LikenessEligibility.undetermined()
+        result = LikenessEligibility.from_response(data)
+        logger.info(
+            "likeness.eligibility_checked",
+            eligible=result.eligible,
+            determined=result.determined,
+            reasons=list(result.reasons),
+        )
+        return result
+
+    async def _require_likeness_eligibility(self, *, surface: str) -> None:
+        """Pre-flight gate in front of any avatar generation. Costs nothing.
+
+        Raises :class:`AvatarUnavailableError` ONLY on a definitive "no" — an
+        undetermined probe falls through to the transport's UI gate, which
+        inspects the real Add-Media dialog and still refuses to submit when the
+        Avatar surface is absent. Two gates, and a generation reaches Flow only
+        if neither objects.
+        """
+        eligibility = await self.check_likeness_eligibility()
+        if eligibility.determined and not eligibility.eligible:
+            reasons = ", ".join(eligibility.reasons) or "unspecified"
+            raise AvatarUnavailableError(
+                f"Flow reports this account is not eligible to use its Avatar "
+                f"(likeness) for {surface} generation: {reasons}. Aborted before "
+                f"submitting — no credits were spent."
+            )
 
     async def generate_character_image(
         self,

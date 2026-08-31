@@ -217,6 +217,12 @@ def build_image_request(payload: dict[str, Any]) -> GenerateImageRequest:
         count=count,
         instructions=_parse_agent_instructions(payload.get("instructions")),
         ui_mode=UiMode(payload["ui_mode"]) if payload.get("ui_mode") else None,
+        # Decoded even though no producer sets it today (avatar has no MCP
+        # surface — see tests/mcp/test_cli_parity.py). A field the payload can
+        # carry but the decoder ignores is a silent-drop bug waiting for the
+        # first producer; two lines now beat an avatar-less generation billed
+        # to a user later.
+        use_avatar=bool(payload.get("use_avatar", False)),
     )
 
 
@@ -301,4 +307,9 @@ def build_video_request(payload: dict[str, Any]) -> GenerateVideoRequest:
         reference_entity_names=reference_entity_names,
         reference_audio=reference_audio,
         ui_mode=ui_mode,
+        # See the note on the image builder: decoded so a payload carrying the
+        # flag can never silently lose the likeness. ``Mode.AVATAR`` normalises
+        # it to True anyway, so a payload with mode='avatar' and no flag is
+        # still correct.
+        use_avatar=bool(payload.get("use_avatar", False)),
     )

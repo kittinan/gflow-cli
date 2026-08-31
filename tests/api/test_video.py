@@ -114,8 +114,11 @@ class TestMode:
     def test_has_r2v(self) -> None:
         assert Mode.R2V == "r2v"
 
-    def test_three_modes(self) -> None:
-        assert {m.value for m in Mode} == {"t2v", "i2v", "r2v"}
+    def test_mode_members(self) -> None:
+        # `avatar` joined t2v/i2v/r2v when Avatar generation landed. The value
+        # is also the OperationKind the recorder writes, so this set is a
+        # contract with the data layer, not just an enum sanity check.
+        assert {m.value for m in Mode} == {"t2v", "i2v", "r2v", "avatar"}
 
 
 class TestGenerateVideoRequest:

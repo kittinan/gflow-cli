@@ -78,6 +78,15 @@ def batch_generate_images_url(project_id: str) -> str:
 # That redirect is also what the client reads to learn the ACCOUNT's locale.
 EDITOR_BOOTSTRAP_URL = "https://labs.google/fx/tools/flow?hl=en"
 
+# Avatar / likeness eligibility (aisandbox Bearer REST). FREE — no reCAPTCHA,
+# no credits. Returns ``{"ineligibilityReasons": [...]}``; an EMPTY/absent list
+# means the account may use its Avatar (``referenceLikenesses``). Our own
+# accounts answer ``["REGION"]`` — see docs/CHARACTER.md § "Why this, not
+# Avatar". gflow uses this as the pre-flight gate for `image avatar` /
+# `video avatar` / `video r2v --avatar` so an ineligible account fails before
+# the browser ever opens the media dialog.
+LIKENESS_CHECK_ELIGIBILITY = f"{FLOW_API_BASE}/flow/likeness:checkEligibility"
+
 # Character entities (tRPC + aisandbox Bearer REST) ------------------------
 CREATE_ENTITY_URL = f"{LABS_TRPC_BASE}/flow.createEntity"
 PROJECT_INITIAL_DATA_URL = f"{LABS_TRPC_BASE}/flow.projectInitialData"

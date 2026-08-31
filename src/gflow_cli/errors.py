@@ -16,6 +16,7 @@ __all__ = [
     "AuthExpiredError",
     "AuthLoginTimeoutError",
     "AuthMissingError",
+    "AvatarUnavailableError",
     "BatchIntegrityError",
     "BatchPartialError",
     "BrowserEngineUnavailableError",
@@ -567,6 +568,45 @@ class UpscaleUnavailableError(GFlowError):
     )
 
 
+class AvatarUnavailableError(GFlowError):
+    """Raised when Flow's Avatar / likeness (``referenceLikenesses``) is not
+    usable on this account, and an Avatar generation was explicitly requested.
+
+    Flow's Avatar is a **verified-identity + region-gated** feature: the account
+    must have completed the one-time likeness scan AND be in an eligible region.
+    ``GET /v1/flow/likeness:checkEligibility`` returns
+    ``{"ineligibilityReasons": ["REGION"]}`` for the accounts this project was
+    developed against (see docs/CHARACTER.md § "Why this, not Avatar"), which is
+    why gflow makes no universal-availability claim.
+
+    Two gates raise this, both **before** any credit-spending submit:
+
+    1. **Pre-flight (free REST).** ``likeness:checkEligibility`` answers a
+       definitive "ineligible" — nothing is opened, no browser work is done.
+    2. **Media dialog.** The eligibility probe was inconclusive, so the Add-Media
+       dialog was opened and inspected; the Avatar surface is absent.
+
+    Distinct from :class:`UiSelectorDriftError` (23) on purpose: drift means "the
+    control moved and gflow needs a selector update"; this means "the control is
+    legitimately not there for this account/region", which no gflow release can
+    fix. Exit code 35 lets scripted callers branch on that difference.
+
+    NOT retryable — a region/eligibility gate answers identically on a re-run.
+    """
+
+    problem_type = "https://gflow-cli.dev/errors/avatar-unavailable"
+    title = "Flow Avatar/likeness unavailable for this account"
+    _default_remediation = (
+        "Avatar (likeness) generation is verified-identity and region gated by "
+        "Google, and is not available on every Flow account. Aborted before "
+        "submitting — no credits were spent. Confirm your account can use the "
+        "Avatar tab in Flow's own web UI (labs.google/fx/tools/flow) first; if it "
+        "cannot, use `gflow character` for a reusable subject instead, or "
+        "`--ref <image>` for a one-off reference. Re-running will not change a "
+        "region verdict."
+    )
+
+
 class UiSelectorDriftError(GFlowError):
     """Raised when a UI-automation selector cascade finds no matching element.
 
@@ -1102,6 +1142,11 @@ EXIT_CODE_MAP: dict[type[GFlowError], int] = {
     # Direct GFlowError subclass; exit 23 lets scripts distinguish "UI drifted"
     # from generic error (1) without parsing stderr.
     UiSelectorDriftError: 23,
+    # AvatarUnavailableError: Flow's Avatar/likeness is verified-identity +
+    # region gated. Direct GFlowError subclass; exit 35 lets scripts branch on
+    # "this account cannot use Avatar at all" versus a selector-drift (23) that
+    # a gflow update could fix. Deliberately NOT retryable.
+    AvatarUnavailableError: 35,
     # ModelModeIncompatibilityError + VideoModelSelectionError BEFORE
     # ConfigurationError (their parent) so the isinstance walk lands on 17/18,
     # not 11. Per [[exit-code-map-ordering-invariant-test-pitfall]].
