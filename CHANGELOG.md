@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **`video t2v` now selects Ingredients for `@Character` mentions.** Character
+  references no longer time out when the project was last left in Frames mode;
+  the classic driver selects the References sub-mode before opening the picker.
+
 ## [0.64.0] — 2026-09-02
 
 ### Added

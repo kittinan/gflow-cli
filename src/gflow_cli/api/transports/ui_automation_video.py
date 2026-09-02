@@ -3768,14 +3768,10 @@ class VideoGenerationMixin:
             )
         elif request.mode is Mode.R2V or request.reference_entities:
             # T2V + reference_entities (`video t2v --reference-entity` / an
-            # `@Character` mention) stages through the SAME picker, on the bare
-            # Video tab — live-verified 2026-08-31, 0 credits (route-aborted
-            # capture): Add Media is rendered there, `_attach_character_entities`
-            # stages the entity, and Flow's own JS re-routes the submit from
-            # batchAsyncGenerateVideoText to batchAsyncGenerateVideoReferenceImages
-            # carrying `referenceEntities`. No sub-mode switch is needed (and none
-            # is made for Mode.T2V). The DTO forbids reference_images/ref_names on
-            # T2V, so `_attach_r2v_references` reduces to the entity attach here.
+            # `@Character` mention) reaches this picker after the classic driver
+            # selects the Ingredients/References sub-mode. The DTO forbids
+            # reference_images/ref_names on T2V, so this helper reduces to the
+            # entity attach there.
             await VideoGenerationMixin._attach_r2v_references(page, request, out_dir=out_dir)
 
     async def _submit_and_poll(

@@ -155,7 +155,7 @@ class ClassicFlowUiDriver:
             await VideoGenerationMixin._switch_video_sub_mode(  # type: ignore[reportPrivateUsage]
                 page, "frames", out_dir=out_dir
             )
-        elif request.mode is Mode.R2V:
+        elif request.mode is Mode.R2V or request.reference_entities:
             await VideoGenerationMixin._switch_video_sub_mode(  # type: ignore[reportPrivateUsage]
                 page, "references", out_dir=out_dir
             )
