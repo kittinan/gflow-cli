@@ -81,16 +81,15 @@ class TestConfigureVideoSettingsDuration:
 class TestConfigureVideoSettingsSubMode:
     """Sub-mode dispatch — pins the t2v entity-attach fix's UI contract.
 
-    Live-verified 2026-08-31 (spike_t2v_entity_attach_repro, 0 credits): a T2V
-    request carrying ``reference_entities`` stages the character from the bare
-    Video tab — the Add-Media picker is rendered there and Flow's own JS
-    re-routes the submit once the entity is included. The driver must NOT
-    switch such a request into the references sub-mode (needless, and the tab
-    is not offered on every cohort); R2V keeps its own switch.
+    A T2V request carrying ``reference_entities`` must enter the Ingredients /
+    References sub-mode before the entity picker is opened. Flow persists the
+    last sub-mode per project, so leaving a project in Frames makes the Add
+    Media control unavailable and causes an 8-second timeout. R2V keeps the
+    same switch, while plain T2V remains unchanged.
     """
 
     @pytest.mark.asyncio
-    async def test_t2v_with_entities_does_not_switch_sub_mode(
+    async def test_t2v_with_entities_switches_to_references(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         stubs = _stub_settings_helpers(monkeypatch)
@@ -100,6 +99,19 @@ class TestConfigureVideoSettingsSubMode:
             reference_entities=("ent-botun",),
         )
         await ClassicFlowUiDriver().configure_video_settings(page, request)
+        stubs.sub_mode.assert_awaited_once()
+        assert stubs.sub_mode.await_args is not None
+        assert stubs.sub_mode.await_args.args == (page, "references")
+
+    @pytest.mark.asyncio
+    async def test_plain_t2v_does_not_switch_sub_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stubs = _stub_settings_helpers(monkeypatch)
+        page = _settings_page()
+        await ClassicFlowUiDriver().configure_video_settings(
+            page, GenerateVideoRequest(prompt="a cat")
+        )
         stubs.sub_mode.assert_not_awaited()
 
     @pytest.mark.asyncio
