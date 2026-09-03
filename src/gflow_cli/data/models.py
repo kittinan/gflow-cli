@@ -29,6 +29,7 @@ class OperationKind(StrEnum):
     # because `Mode.AVATAR.value` is the same string. `assets.kind` still
     # distinguishes the image from the video row.
     AVATAR = "avatar"
+    EXTEND = "extend"
     SCENE_CREATE = "scene_create"
     CHARACTER = "character"
 

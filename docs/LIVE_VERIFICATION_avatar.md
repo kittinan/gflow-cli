@@ -72,7 +72,7 @@ Expected:
 - `gflow data list images --profile <PROFILE>` shows the new asset.
 - The operations row records mode `avatar` (not `t2i`).
 
-Failure modes to record verbatim: exit 35 (`AvatarUnavailableError`) means the
+Failure modes to record verbatim: exit 37 (`AvatarUnavailableError`) means the
 tab was not found — attach `tmp/lv-avatar/debug_no_avatar_tab.png`. Exit 23
 means the picker itself drifted.
 
@@ -182,5 +182,5 @@ Expected: unchanged behaviour, and for the three video runs **no**
 | 2 | Pure Avatar video | | |
 | 3 | R2V + Avatar | | |
 | 4 | Non-English locale | | |
-| 5 | Ineligible account fails at exit 35, zero spend | | |
+| 5 | Ineligible account fails at exit 37, zero spend | | |
 | 6 | t2i / i2i / t2v / i2v / r2v regression | | |

@@ -1966,7 +1966,7 @@ def _print_i2i_summary(images: list[GeneratedImage], saved_paths: list[Path]) ->
         "through Flow's own Add Media dialog, which is what makes Flow attach "
         "`referenceLikenesses` to the request.\n\n"
         "AVAILABILITY: Flow gates Avatar on identity verification AND region. "
-        "gflow checks eligibility before generating and aborts with exit 35 "
+        "gflow checks eligibility before generating and aborts with exit 37 "
         "(no credits spent) when the account cannot use it. Confirm the Avatar "
         "tab works in Flow's web UI first if you are unsure.\n\n"
         "\b\n"

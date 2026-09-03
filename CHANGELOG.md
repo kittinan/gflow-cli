@@ -49,6 +49,277 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ingredients sub-mode switch is needed (and none is made). `video r2v`, `i2v`,
   and the image paths are unchanged; the backstop is untouched.
 
+## [0.66.1] — 2026-09-03
+
+### Fixed
+
+- **A migrated-origin run spent ~36 s discovering a failure knowable in microseconds
+  ([#639](https://github.com/ffroliva/gflow-cli/issues/639)).** `flow.google.com` renders none
+  of the controls gflow drives, so every DOM probe is doomed before it starts — yet the run
+  still burned the full `detect_ui_mode` poll window (~8 s, both arms missing), the crop
+  selector cascade (~24 s) and the URL settle (4 s) before raising `FlowHostMigratedError`.
+  Because the rollout flaps per page load and callers retry on exit 36, that cost was paid on
+  **every attempt** of a retry loop. `get_ui_driver` now checks the host first and fails fast
+  with the same retryable exit 36. The old host is untouched and still gets full DOM detection;
+  a page whose URL cannot be read still probes rather than bailing, so a transient is never
+  mistaken for a migrated origin.
+
+- **Locale resolution was blind on `flow.google.com`, and silently discarded a locale it had
+  already learned ([#643](https://github.com/ffroliva/gflow-cli/issues/643)).** The migrated
+  origin serves `/project/<id>` with no `/fx/<locale>/tools/flow` segment, so
+  `locale_segment_from_url` could never match there. The locale had not disappeared — it moved
+  into `<html lang>`, which stays correct on the migrated host. Two measured consequences:
+  `next_locale_state("pt", None)` returned PROVISIONAL, **demoting** an already-learned locale
+  on every migrated load (so a fully-migrated account could never learn it again, undoing
+  [#587](https://github.com/ffroliva/gflow-cli/issues/587)); and `await_url_settled` burned the
+  full 4 s timeout per navigation waiting for a shape that can no longer exist. gflow now falls
+  back to `<html lang>` when the URL carries no segment, and skips the settle wait entirely on
+  the migrated origin.
+
+  The fallback is evidence-backed, not assumed: measured on two accounts (`en` and `pt-BR`),
+  `<html lang>` **agreed with the URL segment wherever both existed**. Unlike
+  `navigator.language` — which reports the value gflow itself sets — it is server-rendered by
+  Flow. Where Flow does state the locale in the URL, that stays authoritative.
+
+## [0.66.0] — 2026-09-03
+
+### Fixed
+
+- **Flow's migration to `flow.google.com` was reported as selector drift
+  ([#639](https://github.com/ffroliva/gflow-cli/issues/639)).** Google is moving Flow
+  off Labs onto its own origin. The migrated frontend renders **zero** Material Symbols
+  `<i>` elements, so every gflow selector — cohort detection included — misses at once,
+  and the run died with `UiSelectorDriftError` (exit 23, `retryable: false`): an error
+  that reads like the selectors rotted and sent operators hunting for the wrong cause.
+  The rollout **flaps per page load** — the same account and project land on the old
+  host on one navigation and the migrated one on the next — so a re-run frequently
+  succeeds, but the non-retryable classification made automated callers give up.
+  gflow now recognises the migrated origin and raises the distinct, **retryable**
+  `FlowHostMigratedError` (exit 36) naming the migration. Applies to CLI and MCP alike
+  (both route through the shared mode-switch raise site, and `retryable` has a single
+  source of truth). **This does not add support for the migrated frontend** — that is
+  separate work; see [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
+
+- **A migrated page load was misread as a logged-out session
+  ([#639](https://github.com/ffroliva/gflow-cli/issues/639)).** `_check_logged_in`
+  hard-required `labs.google` in the URL, so a perfectly valid authenticated session on
+  the migrated host failed the gate and drove a pointless re-auth. It now accepts both
+  Flow origins.
+
+### Security
+
+- **The authenticated-session URL gate matched hosts by substring.** `_check_logged_in`
+  tested `"labs.google" in page.url`, which any foreign URL satisfies merely by carrying
+  the string in its path or query (`https://evil.example/?next=labs.google/fx/tools/flow`).
+  The host is now parsed and matched exactly.
+
+### Changed
+
+- Incident bundles from a `flow.google.com` load previously reported
+  `url.host_category: "other"` / `url.route: "other"`, hiding the most useful fact about
+  the failure. The migrated origin is now classified as `flow_app`, with the same
+  identifier reduction applied.
+
+Live-verified 2026-09-03 at zero credits against the **real** migrated frontend, on an
+account inside the rollout: `flow_host_kind: "migrated"`, `_check_logged_in: true` (it was
+`false` before the fix), and `_mode_switch_error` returning `FlowHostMigratedError` / exit 36 /
+`retryable: true` — while a credit-free `image t2i` minutes earlier landed on the old host and
+completed exit 0, proving no regression. See
+[docs/LIVE_VERIFICATION_v0.66.0.md](docs/LIVE_VERIFICATION_v0.66.0.md).
+
+## [0.65.0] — 2026-09-02
+
+### Fixed
+
+- **`gflow video chain` and `gflow movie run` died MID-SPEND on `duration` × `model`
+  ([#634](https://github.com/ffroliva/gflow-cli/issues/634),
+  [#635](https://github.com/ffroliva/gflow-cli/issues/635)).** The same defect
+  [#632](https://github.com/ffroliva/gflow-cli/pull/632) fixed for single-clip i2v, but
+  on these two surfaces it crashed *after* earlier links or scenes had already rendered
+  and billed — surfacing as exit 1 `"Unexpected error"` with the explanation lost.
+
+  For chains it was not an occasional mismatch but a **guaranteed** crash:
+  `supports_duration()` is True for `omni_flash` alone, and chains reject `omni_flash`, so
+  no model a chain can use has a duration control. Every manifest `duration` was
+  unsatisfiable by construction — **including the one shipped as the documented example**
+  in `docs/USAGE.md`, which a test pinned as valid.
+
+  Tracing it surfaced a second hole: the `omni_flash` rejection only ever tested the
+  *chain-level* model, while `_build_link_request` prefers a per-link override — so
+  `"model": "omni-flash"` on a link walked past the invariant. Both now validate every
+  link's effective model before link 0 renders, and `--dry-run` refuses what the real run
+  refuses.
+
+  **BREAKING:** a `movie.toml` scene pairing a Veo model with a `duration` parsed before
+  and now fails at parse with exit 11. That combination could never have rendered; it
+  previously failed later and more expensively. Scene `duration` requires
+  `model = "omni-flash"`.
+
+- **`gflow video i2v --duration` with no `--model` died as `"Unexpected error"`
+  ([#630](https://github.com/ffroliva/gflow-cli/issues/630)).** An omitted `--model` on
+  i2v is not "no model" — it binds `veo-lite`, which renders no duration control, so the
+  guard was bypassed in exactly the default case and the DTO's bare `ValueError` escaped
+  as exit 1. It now exits 2 naming the model and the fix. MCP had the same hole and
+  queued the task before failing; `gflow_generate_video` now returns a 400 up front.
+
+- **The `referenceEntity` guard was unobservable, and its e2e could not fail
+  ([#620](https://github.com/ffroliva/gflow-cli/issues/620)).**
+  `tests/e2e/test_entity_smuggling_e2e.py` wrapped both checks in `if bodies:` /
+  `if modified:`, so it passed whether the guard fired or never fired — and the second
+  block only *printed*. It sat through #615 without noticing.
+
+  Fixing the assertions alone would not have been enough: the guard logged only when it
+  *stripped* something, so "never ran" and "ran, nothing to strip" were identical silence.
+  `ui_automation.batch_request_intercepted` now fires on every intercepted request from a
+  `finally` — every exit, including the parse-error branch — carrying
+  `had_reference_entities`, `modified` and `outcome`. **Absence of the event is now
+  evidence**, which is what turned the question blocking #615's fix into a measurement.
+
+- **Image e2e tests were priced in credits they do not cost.** `pyproject.toml` markers,
+  `docs/E2E_TESTING.md`'s cost table, `tests/e2e/conftest.py`, `CONTRIBUTING.md`,
+  `docs/USER_GUIDE.md` and ~20 strings across 13 files claimed image generation spends
+  credits. Only video (Veo) does; images draw on a **daily cap**, which is a rate limit,
+  not a charge. `scripts/canary/run_canary.py` carried the same error as a code constant
+  misnamed for four of its five entries (`_CREDIT_MARKERS` → `_MANUAL_ONLY_MARKERS`,
+  behaviour unchanged — the refusal is about not driving a live browser unattended). A
+  cost model that overstates the price of a free test discourages running it, and the test
+  it discouraged is the one that would have caught #615.
+
+- **The `referenceEntity` guard never ran, on any image or video generation
+  ([#615](https://github.com/ffroliva/gflow-cli/issues/615)).**
+  `_intercept_reference_entities` strips character entities the caller did not
+  request, so a "poisoned" entity left in the Flow composer cannot smuggle itself
+  into an unrelated generation. It had never fired once, on any released version.
+
+  The route glob `**/batchGenerateImages` requires the final path segment to equal
+  `batchGenerateImages`, but the real endpoint is `.../flowMedia:batchGenerateImages`
+  — so it could never match. The **video** guard was dead for the same reason
+  (`.../video:batchAsyncGenerateVideoText`), which the original report does not
+  mention. Registration also moved from the page to the browser context, which
+  covers worker-delegated requests the page level cannot observe.
+
+  The failure was invisible because the response listener does a substring test and
+  kept working normally, and because the guard logged only when it *stripped*
+  something — so "never ran" and "ran, nothing to strip" were identical silence. It
+  failed **open**, quietly. Reported by
+  [@DioServis](https://github.com/DioServis), who separated both causes.
+
+  **Verified live**, A/B-controlled at zero credits: with the fix absent the guard
+  never fired and the test failed; with it present the guard fired and the test
+  passed — same account, same prompt, one variable. That also settles whether Flow
+  delegates to a dedicated Web Worker (it does; `context.route` suffices) and
+  confirms the request rewrite does not corrupt the body. See
+  [docs/LIVE_VERIFICATION_reference_entity_guard.md](docs/LIVE_VERIFICATION_reference_entity_guard.md).
+
+  **Coverage is partial by construction:** direct-wire routes issued through
+  Playwright's `APIRequestContext` are not routable at all and bypass the guard
+  regardless of matcher — tracked in
+  [#619](https://github.com/ffroliva/gflow-cli/issues/619).
+
+## [0.64.0] — 2026-09-02
+
+### Added
+
+- **`gflow video i2v --model omni-flash --end-frame` now works** ([#626](https://github.com/ffroliva/gflow-cli/issues/626)).
+  Google shipped first-and-last-frame generation for Omni 1.1 Flash, so the
+  guard that rejected that combination with exit 17 is gone:
+
+  ```bash
+  gflow video i2v ./start.png "she turns toward the window" \
+      --model omni-flash --end-frame ./end.png --duration 10
+  ```
+
+  omni-flash is the only model that also exposes `--duration`, so this is the
+  one route to a 10-second first+last interpolation.
+
+### Changed
+
+- **i2v end-frame safety moved from a static table to a post-submit route
+  check.** gflow used to decide which models could carry an end frame from a
+  hardcoded capability list, which silently went stale when Google shipped the
+  feature. It now verifies the route Flow *actually* used: a run that carried an
+  end frame but came back on `batchAsyncGenerateVideoStartImage` — Flow dropping
+  the frame at submit and billing a clip that was never interpolated — fails
+  with `WireFormatError` instead of being reported as a success. This also
+  catches a partial or staged rollback on any account, which the old table
+  could not.
+
+  **Breaking for scripts** that branched on exit 17 for `omni-flash` +
+  `--end-frame`: that combination now succeeds. Exit 17 is unchanged for
+  `gflow video chain --model omni-flash`, which is still rejected (chain-scale
+  seeded i2v remains unverified).
+
+- **MCP↔CLI parity is now a duty of every pipeline phase** (contributor-facing).
+  `tests/mcp/test_cli_parity.py` is command-level: it fires when a new CLI *leaf*
+  lacks a mapped MCP tool, and stays green while an option goes unmirrored, a
+  queued-payload key goes unread, or a tool docstring asserts a restriction the
+  CLI no longer has. #626 shipped exactly that third case — `mcp/tools.py` and
+  `docs/MCP.md` kept telling agents `omni_flash` was rejected for i2v-with-frames
+  through a fully green pipeline. Each skill now owns a slice: `issue-assessment`
+  names affected surfaces, `predict` scopes the MCP blast radius, `scenario` adds
+  **D13**, `plan` makes the MCP mirror **task 6** (not optional when task 5
+  exists), `pr-council-review` adds **D15**, `check` adds **step 1b** (the
+  canonical six mirror axes), `live-verify` treats the MCP queued path as
+  separate code, and `doc-review` grades a *false* MCP claim as release-blocking.
+  Automating the mechanically checkable part is tracked in
+  [#628](https://github.com/ffroliva/gflow-cli/issues/628).
+
+### Fixed
+
+- **`AGENTS.md`'s Impeccable Routine was missing `generate_website_docs.py --check`**,
+  which `skills/check` already ran. Following the shorter list produced a green
+  local run against a stale `website/docs/` mirror and a red CI. The two lists now
+  agree.
+
+## [0.63.0] — 2026-09-01
+
+### Added
+
+- **`gflow video extend` — continue a clip past Flow's 8-second ceiling.** Veo's
+  extend route generates a new 8s segment seeded server-side from the source
+  clip, so motion and audio carry across the join instead of restarting from a
+  still (which is what `video chain` does, and why it needs a fade guard). Pass
+  one prompt per segment, or `--segments N` to reuse the last one:
+
+  ```bash
+  gflow video extend <media-id> "the wave recedes" --project <id>
+  gflow video extend <media-id> "drifts out to sea" --project <id> -n 4 -o long.mp4
+  ```
+
+  The result is a Flow Scene; `-o` renders it to a single mp4 through the
+  existing credit-free server-side concat.
+
+  > Known limitation, found in live verification: a segment carries ~7s of real
+  > content though Flow advertises and bills 8s, so each internal seam of a
+  > multi-segment render is preceded by ~1s of frozen frame and silence. Single
+  > segments are unaffected. Details and the open questions are in
+  > [KNOWN_ISSUES](KNOWN_ISSUES.md).
+
+  - **The model key is resolved per run, never hardcoded.** Flow's extend family
+    is tier-gated — `_ultra` variants are Advanced-only and read `UNAVAILABLE`
+    elsewhere — so the key comes from the account's own capability listing,
+    picking the cheapest orderable model exactly as Flow's own UI does. A pinned
+    key would 403 forever on the wrong tier.
+  - **Costs are shown before anything is submitted**, and a pre-flight balance
+    check refuses a run the balance cannot finish. `--dry-run` prints the plan
+    without opening a browser.
+  - **Serial by construction, and paced.** Segments submit one at a time with a
+    non-zero default jitter (`GFLOW_CLI_JITTER_RANGE`). A refusal aborts with
+    completed segments preserved and is never auto-retried.
+  - `1:1` is refused up front — Flow publishes no square extend model.
+
+### Fixed
+
+- **Ctrl+C during a billed run said nothing.** `run_with_handlers` exited 130
+  silently, so a user who interrupted a multi-segment run could not tell whether
+  anything had been charged or how to resume. It now reports credits spent,
+  segments completed and the resume handle. Fixed at the shared boundary, so
+  `video chain` and `movie run` gain it too.
+- **`sessionId` was not redacted.** `redact_metadata` covered `token` and
+  `recaptchaToken` but not `sessionId`, which the extend request carries. Not a
+  credential, but account-correlatable, and it would otherwise reach any logged
+  request body or diagnostics bundle verbatim.
+
 ## [0.62.1] — 2026-08-30
 
 ### Fixed
@@ -86,7 +357,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was developed against. Two gates run before anything can be spent: a free
   pre-flight eligibility read, then — if that is inconclusive — an inspection of
   the real media dialog. Either verdict aborts with the new
-  `AvatarUnavailableError` (**exit 35**, deliberately not retryable) *before* the
+  `AvatarUnavailableError` (**exit 37**, deliberately not retryable) *before* the
   prompt is submitted. gflow never silently degrades to a likeness-free t2i/t2v.
   See [USAGE § Avatar availability](docs/USAGE.md#avatar-availability-region-and-account-eligibility).
 
@@ -3521,7 +3792,12 @@ shell-script template that branches on these codes.
 
 First skeleton. Not functional end-to-end yet.
 
-[Unreleased]: https://github.com/ffroliva/gflow-cli/compare/v0.62.1...HEAD
+[Unreleased]: https://github.com/ffroliva/gflow-cli/compare/v0.66.1...HEAD
+[0.66.1]: https://github.com/ffroliva/gflow-cli/compare/v0.66.0...v0.66.1
+[0.66.0]: https://github.com/ffroliva/gflow-cli/compare/v0.65.0...v0.66.0
+[0.65.0]: https://github.com/ffroliva/gflow-cli/compare/v0.64.0...v0.65.0
+[0.64.0]: https://github.com/ffroliva/gflow-cli/compare/v0.63.0...v0.64.0
+[0.63.0]: https://github.com/ffroliva/gflow-cli/compare/v0.62.1...v0.63.0
 [0.62.1]: https://github.com/ffroliva/gflow-cli/compare/v0.62.0...v0.62.1
 [0.62.0]: https://github.com/ffroliva/gflow-cli/compare/v0.61.0...v0.62.0
 [0.61.0]: https://github.com/ffroliva/gflow-cli/compare/v0.60.0...v0.61.0

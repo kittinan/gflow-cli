@@ -36,14 +36,14 @@ class TestAvatarCommandSurface:
         # The availability caveat is load-bearing: the feature is region gated
         # and the help must not imply otherwise.
         assert "region" in result.output.lower()
-        assert "exit 35" in result.output
+        assert "exit 37" in result.output
 
     def test_image_avatar_is_registered_and_documents_the_region_gate(self) -> None:
         result = CliRunner().invoke(image, ["avatar", "--help"])
 
         assert result.exit_code == 0
         assert "region" in result.output.lower()
-        assert "exit 35" in result.output
+        assert "exit 37" in result.output
 
     @pytest.mark.parametrize(
         "opt",
@@ -371,11 +371,11 @@ class TestAvatarJsonOutput:
 
         result, _ = _run_video(["avatar", "p", "--json"], tmp_path, generate=_refuse)
 
-        assert result.exit_code == 35, result.output
+        assert result.exit_code == 37, result.output
         data = _json.loads(result.output)
         assert data["status"] == "fail"
         assert data["error"]["class"] == "AvatarUnavailableError"
-        assert data["error"]["exit_code"] == 35
+        assert data["error"]["exit_code"] == 37
         assert data["error"]["retryable"] is False
         assert data["error"]["remediation_hint"]
 
@@ -420,7 +420,7 @@ class TestAvatarOperationRecording:
         with patch("gflow_cli.cli_video.record_failed_operation_safe", _capture):
             result, _ = _run_video(["avatar", "p"], tmp_path, recorder=recorder, generate=_boom)
 
-        assert result.exit_code == 35, result.output
+        assert result.exit_code == 37, result.output
         assert len(seen) == 1
         assert seen[0]["mode"] is OperationKind.AVATAR
         assert seen[0]["command"] == "video avatar"

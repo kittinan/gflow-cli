@@ -73,6 +73,14 @@ path is default-in-scope; skipping this gate requires a named reason, not silenc
    - Which command(s) does the change touch?
    - Which variations actually exercise it? (E.g. for a mention-resolution fix: a character
      mention, a media mention, an ambiguous-name case, an unresolvable name.)
+   - **Which surface(s)?** A capability that ships as both a CLI command and an MCP tool has
+     **two live paths, not one** — and the MCP queued path runs different code
+     (`mcp/tools.py` → queue payload → `worker/codec.py` → request → daemon owns download and
+     recording). A CLI run does not exercise it. Decide per change whether the MCP path needs
+     its own live run, and if you skip it, say so with a reason. The cheap version is usually
+     enough: one queued MCP call on a credit-free operation proves the payload keys round-trip,
+     which is the hop that silently no-ops (#495). Offline parity tests cannot see this —
+     they never build a real payload and decode it.
 
 **2. Check the cost tier for each variation — the tier follows the operation, not the
    command family:**
@@ -83,7 +91,7 @@ path is default-in-scope; skipping this gate requires a named reason, not silenc
      user first.
    - **Anything that generates real media is costed**, even on an otherwise-free command
      family — e.g. `gflow character create --face-prompt` generates real face/body images
-     and costs Imagen credits despite being "character CRUD" in name; `i2v` and other
+     and drives real image generation despite being "character CRUD" in name (zero credits, daily-capped); `i2v` and other
      video-generation paths are always costed. Always get explicit operator go-ahead before
      running a costed variation. Batch the ask: name what will run and why, once, not one
      confirm per call.

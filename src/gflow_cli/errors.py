@@ -27,9 +27,11 @@ __all__ = [
     "DataIntegrityError",
     "DataMigrationError",
     "DataStoreError",
+    "ExtendUnavailableError",
     "FlowAgentUiError",
     "FlowApiError",
     "FlowAppError",
+    "FlowHostMigratedError",
     "FrameExtractionError",
     "GFlowError",
     "MediaAttributionError",
@@ -489,18 +491,22 @@ class ModelModeIncompatibilityError(ConfigurationError):
     """Raised when the chosen video model is incompatible with the requested
     generation mode (issue #125).
 
-    Canonical cases today: ``omni-flash`` with an i2v END frame (first+last
-    interpolation is "coming soon" for it per Flow's support matrix, with no
-    wire-level proof of the StartAndEndImage route), and ``omni-flash`` for
-    chains (single-clip start-frame i2v was wire-verified 2026-08-03; N
+    One case remains: ``omni-flash`` for **chains**. Single-clip start-frame
+    i2v was wire-verified 2026-08-03 and the end frame on 2026-09-02, but N
     seeded links back-to-back has not been, so chains stay on the Veo 3.1
-    family). History: omni-flash was excluded from i2v entirely after a
-    2026-05-30 capture showed Flow silently dropping the frame refs at
-    submit and billing the run as text-to-video; the start-frame path has
-    since been re-verified on the wire and re-enabled. This error is raised
-    pre-submit by both the CLI and the transport (defense-in-depth for
-    direct ``FlowApiClient`` callers that bypass the CLI), so it never
-    spends a credit.
+    family.
+
+    History: omni-flash was excluded from i2v entirely after a 2026-05-30
+    capture showed Flow silently dropping the frame refs at submit and billing
+    the run as text-to-video. The start-frame path was re-verified on the wire
+    and re-enabled (#125); the END frame followed once Flow shipped first+last
+    for Omni 1.1 Flash and two accounts reproduced the
+    ``StartAndEndImage`` route at zero credits (#626). What guards the i2v path
+    now is a post-submit route check in the transport, not this error — it
+    validates the route Flow actually used rather than a static capability
+    table that can go stale in either direction.
+
+    Raised pre-submit at the CLI boundary, so it never spends a credit.
 
     Distinct exit code 17 (not Click's exit 2, not generic exit 1) so
     scripted callers can branch on "I picked an incompatible
@@ -511,9 +517,10 @@ class ModelModeIncompatibilityError(ConfigurationError):
     title = "Model is incompatible with the requested generation mode"
     _default_remediation = (
         "The selected video model does not support this generation mode. "
-        "omni-flash supports start-frame i2v only: drop --end-frame, or use "
-        "a Veo 3.1 model (veo-lite / veo-fast / veo-quality / veo-lite-lp) "
-        "for first+last interpolation and for chains. See issue #125."
+        "omni-flash is not accepted for `gflow video chain`: chains stay on a "
+        "Veo 3.1 model (veo-lite / veo-fast / veo-quality / veo-lite-lp). "
+        "Single-clip i2v — including --end-frame — is unaffected. "
+        "See issues #125 and #626."
     )
 
 
@@ -589,7 +596,7 @@ class AvatarUnavailableError(GFlowError):
     Distinct from :class:`UiSelectorDriftError` (23) on purpose: drift means "the
     control moved and gflow needs a selector update"; this means "the control is
     legitimately not there for this account/region", which no gflow release can
-    fix. Exit code 35 lets scripted callers branch on that difference.
+    fix. Exit code 37 lets scripted callers branch on that difference.
 
     NOT retryable — a region/eligibility gate answers identically on a re-run.
     """
@@ -604,6 +611,39 @@ class AvatarUnavailableError(GFlowError):
         "cannot, use `gflow character` for a reusable subject instead, or "
         "`--ref <image>` for a one-off reference. Re-running will not change a "
         "region verdict."
+    )
+
+
+class ExtendUnavailableError(GFlowError):
+    """Raised when no Veo *extend* model is orderable for this account/aspect.
+
+    Flow's extend family is tier-gated: `veo_3_1_extend_*_ultra` is
+    ``SERVICE_TIER_ADVANCED``-only, the un-suffixed variants serve
+    INTERMEDIATE/ENTRY, and every entry carries a per-tier ``creditMapping`` whose
+    cost reads ``"UNAVAILABLE"`` where the account cannot order it. There is also
+    no SQUARE key in either family. So "which model?" has no static answer — it is
+    resolved per run from ``flow.projectInitialData``.
+
+    This error means that resolution found nothing: an unsupported aspect, a
+    cohort without the extend capability, or a tier whose every candidate reads
+    ``UNAVAILABLE``. Raising beats falling back to a hardcoded key — a pinned key
+    that the account cannot order produces a 403 on every attempt, which is the
+    exact failure mode of the third-party CLI that prompted this feature.
+
+    Distinct exit code 35 (not WAF's 10) for the same reason
+    :class:`UpscaleUnavailableError` has 22: both are tier gates that look like a
+    WAF 403 on the wire, and a caller told "you were blocked, cool down 30 minutes"
+    would wait for a condition that never changes. The caller MUST NOT auto-retry.
+    """
+
+    problem_type = "https://gflow-cli.dev/errors/extend-unavailable"
+    title = "Video extend unavailable for this account"
+    _default_remediation = (
+        "No extend model is available for this account and aspect ratio. Extend "
+        "supports 16:9 and 9:16 only (there is no square variant). If you are on a "
+        "lower tier, the faster extend models may be gated — check `gflow models`. "
+        "If you just upgraded, re-run `gflow auth login --profile <name>` to refresh "
+        "the session."
     )
 
 
@@ -669,6 +709,36 @@ class FlowAppError(GFlowError):
         "Google Flow's web app failed to load (a client-side exception on "
         "labs.google) — a transient Flow-side error, not a gflow-cli bug. Retry in a "
         "moment; if it persists, check https://labs.google/fx and try a fresh session."
+    )
+
+
+class FlowHostMigratedError(GFlowError):
+    """Raised when Flow served the project from ``flow.google.com`` — the origin
+    Google is migrating the app onto (issue #639) — instead of ``labs.google``.
+
+    The migrated frontend is a different build: it renders none of the Material
+    Symbols ligature elements every gflow selector anchors on, so cohort
+    detection and every mode control miss at once. That is NOT selector rot, and
+    reporting it as :class:`UiSelectorDriftError` (exit 23, "file a bug about the
+    selector") sent operators hunting for the wrong cause.
+
+    **Retryable** (exit code 36): the migration flaps per page load — the same
+    account, profile and project land on the old host on one navigation and the
+    new one on the next — so a re-run frequently succeeds. This error does NOT
+    mean gflow supports the migrated frontend; it names the situation and lets
+    callers retry into it.
+    """
+
+    problem_type = "https://gflow-cli.dev/errors/flow-host-migrated"
+    title = "Flow served the migrated flow.google.com frontend"
+    _default_remediation = (
+        "Google is moving Flow from labs.google to flow.google.com, and gflow-cli "
+        "cannot drive the migrated frontend yet — it ships none of the UI controls "
+        "gflow automates. The migration currently flaps per page load, so retrying "
+        "often lands the old frontend and succeeds. If EVERY attempt now lands on "
+        "flow.google.com, the rollout has completed for your account and retrying "
+        "will not help — follow "
+        "https://github.com/ffroliva/gflow-cli/issues/639 for support status."
     )
 
 
@@ -1138,15 +1208,17 @@ EXIT_CODE_MAP: dict[type[GFlowError], int] = {
     # from WafRejectionError's 10 even though both are HTTP 403. Direct GFlowError
     # subclass, so unconstrained by the ordering invariant.
     UpscaleUnavailableError: 22,
+    ExtendUnavailableError: 35,
     # UiSelectorDriftError (issue #183): Flow UI changed, selector probe failed.
     # Direct GFlowError subclass; exit 23 lets scripts distinguish "UI drifted"
     # from generic error (1) without parsing stderr.
     UiSelectorDriftError: 23,
     # AvatarUnavailableError: Flow's Avatar/likeness is verified-identity +
-    # region gated. Direct GFlowError subclass; exit 35 lets scripts branch on
+    # region gated. Direct GFlowError subclass; exit 37 lets scripts branch on
     # "this account cannot use Avatar at all" versus a selector-drift (23) that
-    # a gflow update could fix. Deliberately NOT retryable.
-    AvatarUnavailableError: 35,
+    # a gflow update could fix. Deliberately NOT retryable. (37, not the 35 this
+    # fork first used: upstream v0.65.0 claimed 35 for ExtendUnavailableError.)
+    AvatarUnavailableError: 37,
     # ModelModeIncompatibilityError + VideoModelSelectionError BEFORE
     # ConfigurationError (their parent) so the isinstance walk lands on 17/18,
     # not 11. Per [[exit-code-map-ordering-invariant-test-pitfall]].
@@ -1157,6 +1229,12 @@ EXIT_CODE_MAP: dict[type[GFlowError], int] = {
     BrowserEngineUnavailableError: 24,
     FlowAgentUiError: 25,
     FlowAppError: 31,
+    # FlowHostMigratedError (#639): Flow served the migrated
+    # flow.google.com frontend, whose DOM gflow cannot drive. Direct
+    # GFlowError subclass; exit 36 lets scripts distinguish "wrong Flow
+    # frontend, retry" from genuine selector drift (23), which it used to
+    # masquerade as.
+    FlowHostMigratedError: 36,
     # UiModeUnavailableError (issue #299): a command's required arm (--ui-mode /
     # inferred) couldn't be reached after a best-effort switch. Direct GFlowError
     # subclass — retryable policy abort, distinct from FlowAgentUiError (25).
@@ -1213,6 +1291,9 @@ RETRYABLE_ERRORS: tuple[type[GFlowError], ...] = (
     BrowserSessionClosedError,
     FlowAppError,
     FlowAgentUiError,
+    # #639: the labs.google / flow.google.com migration flaps per page
+    # load, so re-navigating often lands the drivable frontend.
+    FlowHostMigratedError,
     # #299: the cohort is server-assigned per page load and flaps — the
     # documented remediation for exit 28 IS "retry"; the machine flag must
     # agree with the docs.

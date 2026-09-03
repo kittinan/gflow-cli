@@ -107,7 +107,7 @@ Every subcommand accepts `--profile <name>` (per-subcommand, not global) to driv
 **Avatar is not universally available.** Flow gates the Avatar/likeness on
 identity verification AND region, so do not present `image avatar` / `video
 avatar` / `r2v --avatar` as something that will work for every user. gflow
-checks eligibility for free and aborts with **exit 35**
+checks eligibility for free and aborts with **exit 37**
 (`AvatarUnavailableError`) *before* spending anything when the account cannot
 use it; that exit code is not retryable. When it fires, suggest `gflow
 character` (a reusable subject) or `--ref <image>` (a one-off reference)

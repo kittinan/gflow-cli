@@ -6,7 +6,7 @@ RED phase: all tests fail with ModuleNotFoundError until _common.py is created.
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -15,6 +15,8 @@ from gflow_cli.api.transports._common import (
     FLOW_URL,
     PER_CALL_TIMEOUT_S,
     REFRESH_SAFETY_MARGIN_S,
+    await_url_settled,
+    flow_host_kind,
     interpret_response,
     mint_batch_id,
 )
@@ -240,3 +242,97 @@ def test_interpret_response_500_redacts_signed_url_in_body() -> None:
     with pytest.raises(NetworkError) as excinfo:
         interpret_response("bearer", _resp(500, body))
     assert "abcdef123456" not in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# #639: Flow's migration to flow.google.com — host classification
+# ---------------------------------------------------------------------------
+
+
+class TestFlowHostKind:
+    """``flow_host_kind`` is the single place that knows which origins serve
+    Flow. It is TOTAL: any input that is not a parseable https Flow URL returns
+    ``None`` rather than raising, because both call sites read ``page.url`` on a
+    best-effort path where a probe error must never abort the real diagnosis.
+    """
+
+    def test_labs_host_is_labs(self) -> None:
+        assert flow_host_kind("https://labs.google/fx/tools/flow?hl=en") == "labs"
+
+    def test_localised_labs_path_is_labs(self) -> None:
+        assert flow_host_kind("https://labs.google/fx/pt/tools/flow/project/abc") == "labs"
+
+    def test_migrated_host_is_migrated(self) -> None:
+        assert flow_host_kind("https://flow.google.com/project/abc-123") == "migrated"
+
+    def test_unknown_host_is_none(self) -> None:
+        assert flow_host_kind("https://example.com/") is None
+
+    def test_accounts_google_is_none(self) -> None:
+        assert flow_host_kind("https://accounts.google.com/v3/signin/identifier") is None
+
+    def test_host_match_is_exact_not_substring(self) -> None:
+        """Security: the gate this replaces was ``"labs.google" in page.url``,
+        which an attacker-controlled URL satisfies in a query string or path."""
+        assert flow_host_kind("https://evil.example/?next=labs.google/fx/tools/flow") is None
+        assert flow_host_kind("https://labs.google.evil.example/fx/tools/flow") is None
+        assert flow_host_kind("https://flow.google.com.evil.example/project/x") is None
+
+    def test_subdomain_of_labs_is_not_flow(self) -> None:
+        assert flow_host_kind("https://cdn.labs.google/fx/tools/flow") is None
+
+    def test_host_is_case_insensitive(self) -> None:
+        assert flow_host_kind("https://FLOW.GOOGLE.COM/project/x") == "migrated"
+
+    def test_non_https_is_none(self) -> None:
+        assert flow_host_kind("http://flow.google.com/project/x") is None
+
+    def test_non_string_input_is_none(self) -> None:
+        """A MagicMock page whose ``.url`` was never set must not raise."""
+        assert flow_host_kind(MagicMock()) is None
+        assert flow_host_kind(None) is None
+
+    def test_malformed_url_is_none(self) -> None:
+        assert flow_host_kind("https://[oops") is None
+        assert flow_host_kind("") is None
+
+
+# ---------------------------------------------------------------------------
+# #643: await_url_settled must not wait for a shape the migrated origin cannot have
+# ---------------------------------------------------------------------------
+
+
+class TestAwaitUrlSettledOnMigratedHost:
+    """On `flow.google.com` the localised URL shape can never appear — the path is
+    `/project/<id>`, with no `/fx/<locale>/tools/flow` segment at all.
+
+    Measured on two profiles: `await_url_settled` burned the FULL 4 s
+    `URL_SETTLE_TIMEOUT_MS` on every migrated navigation (4018 ms / 4017 ms) to
+    return the `None` it could have returned immediately. That is spent on top of
+    the ~8 s mode-detect window and ~24 s crop cascade a migrated run already
+    wastes before failing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_none_immediately_on_migrated_host(self) -> None:
+        page = MagicMock()
+        page.url = "https://flow.google.com/project/abc-123"
+        page.wait_for_url = AsyncMock(side_effect=AssertionError("must not wait"))
+        assert await await_url_settled(page) is None
+        page.wait_for_url.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_still_waits_on_the_labs_host(self) -> None:
+        """No regression: the old host CAN still redirect, so the wait must stay."""
+        page = MagicMock()
+        page.url = "https://labs.google/fx/tools/flow"
+        page.wait_for_url = AsyncMock()
+        await await_url_settled(page)
+        page.wait_for_url.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_already_localised_url_still_short_circuits(self) -> None:
+        page = MagicMock()
+        page.url = "https://labs.google/fx/pt/tools/flow"
+        page.wait_for_url = AsyncMock(side_effect=AssertionError("must not wait"))
+        assert await await_url_settled(page) == "https://labs.google/fx/pt/tools/flow"

@@ -33,8 +33,23 @@ UPLOAD_IMAGE = f"{FLOW_API_BASE}/flow/uploadImage"
 UPSAMPLE_IMAGE = f"{FLOW_API_BASE}/flow/upsampleImage"
 
 # Video generation (reCAPTCHA-required for GENERATE_VIDEO)
+#
+# ⚠️ Both constants currently have ZERO consumers in src/ — production T2V/I2V
+# rides `ui_automation_video.py`, which drives Flow's UI and passively captures
+# the request Flow itself emits. PLAN.md ADR-14 retired the direct-wire callers
+# as "401-dead". Two independent readers have since mistaken these live-looking
+# constants for a working REST path, so state it plainly rather than deleting
+# them (CHECK_VIDEO_STATUS is needed by the extend poller):
+#   - GENERATE_VIDEO      — retired 2026-05-19, NOT re-tested since. Unknown, not proven dead.
+#   - CHECK_VIDEO_STATUS  — no outbound poller exists anywhere in src/; the
+#                           production video poller scans Flow's OWN captured
+#                           status traffic and assumes the SPA is on-screen.
+# A direct-wire submit (e.g. the extend route, verified 200 on 2026-08-31) gives
+# Flow's UI no reason to poll our media id, so it must bring its own poller —
+# shape it after `client._poll_concat_until_done`.
 GENERATE_VIDEO = f"{FLOW_API_BASE}/video:batchAsyncGenerateVideoText"
 CHECK_VIDEO_STATUS = f"{FLOW_API_BASE}/video:batchCheckAsyncVideoGenerationStatus"
+EXTEND_VIDEO = f"{FLOW_API_BASE}/video:batchAsyncGenerateVideoExtendVideo"
 
 # Workflow management
 ARCHIVE_WORKFLOW_BASE = f"{FLOW_API_BASE}/flowWorkflows"  # + /{workflow_id}
@@ -204,6 +219,38 @@ def locale_segment_from_url(url: str) -> str | None:
     if match is None:
         return None
     return match.group(1).lower()
+
+
+_LANG_ATTR_RE = re.compile(r"^([a-z]{2,3})(?:-[a-z]{2,4})?$")
+
+
+def locale_segment_from_lang_attr(lang: str | None) -> str | None:
+    """Derive Flow's locale SEGMENT from a page's ``<html lang>`` attribute (#643).
+
+    Needed because the migrated ``flow.google.com`` origin serves ``/project/<id>``
+    with **no locale segment at all** — :func:`locale_segment_from_url` is
+    structurally blind there. The locale did not disappear with the URL shape; it
+    is still served in the document.
+
+    Measured 2026-09-03 on two profiles, old host vs migrated:
+
+    * ``ffroliva``  old ``/fx/tools/flow`` (bare), ``lang=en``  -> migrated ``lang=en-GB``
+    * ``denon82``   old ``/fx/pt/tools/flow``,     ``lang=pt``  -> migrated ``lang=pt``
+
+    ``html lang`` **agreed with the URL segment wherever both existed**, which is
+    what licenses it as a fallback. Unlike ``navigator.language`` — which reports
+    the value gflow itself sets when it launches the context, and so answers
+    confidently but wrongly — this attribute is server-rendered by Flow.
+
+    The region suffix is dropped (``en-GB`` -> ``en``) because Flow's URL segments
+    carry no region, and the two derivations must stay comparable. Anything that
+    is not a plausible tag returns ``None`` — "build the bare URL" is always safe,
+    and guessing is the defect this exists to avoid.
+    """
+    if not lang:
+        return None
+    match = _LANG_ATTR_RE.match(lang.strip().lower())
+    return match.group(1) if match else None
 
 
 def project_editor_url(locale: str | None, project_id: str) -> str:

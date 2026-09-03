@@ -14,6 +14,103 @@ Living list of behaviour that's broken, surprising, or limited by design — alo
 
 ## Open
 
+### Flow is migrating to `flow.google.com`; the migrated frontend is not drivable
+
+- **Status:** Open · **Severity:** High (every generation command fails on a migrated page load) · **Affected:** all `gflow image` / `gflow video` generation, CLI and MCP alike, on accounts the rollout has reached
+- **Tracked:** [#639](https://github.com/ffroliva/gflow-cli/issues/639) · Reported 2026-09-02 against 0.59.0, 0.62.1, 0.63.0 and 0.65.0
+- **Confirmed live 2026-09-03 on a second, independent account** (`ffroliva`) — see [LIVE_VERIFICATION_v0.66.0](https://github.com/ffroliva/gflow-cli/blob/main/docs/LIVE_VERIFICATION_v0.66.0.md). A read-only probe of the migrated origin measured `i_total: 0`, reproducing the reporter's central measurement.
+
+Google is moving Flow off Labs onto its own origin. On a migrated page load,
+`https://labs.google/fx/tools/flow/project/<id>` redirects to
+`https://flow.google.com/project/<id>` and serves a rewritten frontend that
+contains **zero `<i>` elements**. Every gflow selector anchors on Material
+Symbols ligatures (`i.google-symbols:text-is(...)`), so cohort detection and
+every mode control miss at once.
+
+**The rollout flaps per page load.** The same account, profile and project land
+on the old host on one navigation and the migrated one on the next, minutes
+apart, with no client change. Measured on one account ~35 minutes apart:
+
+```
+old host       labs.google/fx/<locale>/tools/flow/...   i=55  i.google-symbols=49  crop_* present   -> exit 0
+migrated host  flow.google.com/project/...              i=0   i.google-symbols=0   crop_* absent    -> exit 36
+```
+
+Note the migrated URL **drops `/fx/tools/flow` entirely** — it is `/project/<id>`, not
+`/fx/<locale>/tools/flow/project/<id>`. Any host gate written as a substring test on
+`labs.google` could never have matched it.
+
+This is **not** selector rot, not [#493](https://github.com/ffroliva/gflow-cli/issues/493),
+and not the agentic cohort — the agentic indicators are absent too. It is a
+different origin serving different markup.
+
+**Workaround:** re-run the command. While the rollout flaps, a fresh navigation
+frequently lands the old frontend and the run completes normally. Automated
+callers get this for free: the failure is `FlowHostMigratedError` (exit 36) with
+`retryable: true`, so retry loops driven by the `--json` / MCP / worker error
+envelope will keep trying.
+
+**What gflow does today (v0.66.0):** recognises the migrated origin and fails
+with the distinct, retryable exit 36 instead of the misleading
+`UiSelectorDriftError` (exit 23, "file a selector bug"). `_check_logged_in` also
+accepts the migrated host, so a migrated load is no longer misread as a
+logged-out session. **Support for driving the new frontend is separate work and
+is not implemented** — once the rollout completes for an account, no retry will
+help until then.
+
+---
+
+### A Veo extend segment is 7 seconds, not the 8 Flow advertises — so concat pads a frozen second
+
+- **Status:** Open · **Severity:** Medium (audible/visible on every internal seam of a chained extend) · **Affected:** `gflow video extend -n >1` with `-o`, and any scene mixing extend segments
+- **Discovered:** 2026-09-01, by live verification of the extend feature. Offline tests could not have found it.
+
+**What happens.** `gflow video extend ... -n 2 -o out.mp4` produces a file whose
+audio drops to digital silence (−91 dB) for exactly one second before each
+internal seam, over a **frozen video frame**. The seam itself is clean; the dead
+second sits immediately before it.
+
+**Measured.** In a 3-clip render (original + 2 extensions), per-second mean volume:
+
+```
+ 7s -28.8   8s -26.4      <- original -> extension seam: continuous
+14s -29.1  15s -75.1  16s -33.9   <- extension -> extension seam: 1s dropout
+```
+
+Finer slices put the silence at 15.00–15.99s exactly. Reproduced independently on
+a second render made days earlier from different prompts (14s −22.4, **15s −70.1**,
+16s −23.9), so it is systematic, not a one-off.
+
+**Root cause.** The extension media is **7.000000 seconds** — both video and audio
+streams, confirmed by `ffprobe` on the downloaded clip. But:
+
+- the capability listing advertises `videoLengthSeconds: 8` for
+  `veo_3_1_extension_lite`, and
+- `getSceneWorkflows` reports `total_duration=8.0`, `end=8.0` for that clip.
+
+`ConcatInput` passes those metadata values through verbatim, so Flow's
+server-side concat stretches a 7s clip into an 8s slot by holding the last frame
+and muting. The final segment escapes it only because the render ends before its
+padding (23.02s for 3 clips, not 24s).
+
+**Why it matters more than it looks.** A freeze-hold is the specific failure the
+Compiled Growth parable runbook forbids — *"NEVER pad by freeze-holding a frame —
+reads as 'video stuck'"* — and that pipeline is the named consumer for extend.
+An N-segment chain has N−1 of these.
+
+**Not yet established** (do not fix on a guess):
+
+- whether 7.0s is constant across extend models, aspects and tiers, or specific
+  to `veo_3_1_extension_lite`;
+- whether Flow's own UI renders the same padding (i.e. whether this is our
+  concat inputs or Flow's behaviour end-to-end);
+- whether any API field reports the real media duration, which is what a clean
+  fix needs — clamping `ConcatInput.end` to a hardcoded 7.0 would be a guess
+  dressed as a fix.
+
+**Workaround today.** Render without `-o` and trim in post, or accept the
+freeze-hold. Single-segment extends are unaffected.
+
 ### Avatar / likeness is region- and identity-gated, and its selectors are unverified
 
 - **Status:** Open (shipped with two pre-submit gates; not live-verifiable here)
@@ -28,7 +125,7 @@ consequences, both stated plainly rather than papered over:
 1. **Your account may simply not have this feature.** gflow does not claim
    otherwise. It checks eligibility for free before generating, and inspects the
    real media dialog when that check is inconclusive; either verdict aborts with
-   `AvatarUnavailableError` (**exit 35**) *before* the prompt is submitted, so no
+   `AvatarUnavailableError` (**exit 37**) *before* the prompt is submitted, so no
    credits are spent. gflow never falls back to a likeness-free generation.
 2. **The Avatar-tab selectors are UNVERIFIED against live Flow.** Every other
    selector family in `ui_automation_video.py` carries a live capture date; the
@@ -44,7 +141,6 @@ consequences, both stated plainly rather than papered over:
 not appear there, use [`gflow character`](USAGE.md#gflow-character) for a
 reusable subject, or `--ref <image>` for a one-off reference. Re-running will not
 change a region verdict — the error is deliberately not marked retryable.
-
 ### An out-of-range Playwright silently wedges video generation
 
 - **Status:** Mitigated (v0.49.0 — upper-bounded dependency + fail-fast watchdog)
@@ -283,6 +379,35 @@ and tag counts — no cookies, tokens, prompts, or page text; if absent, the
 incident bundle's `ui.json` carries the same data). Attach it to
 [#493](https://github.com/ffroliva/gflow-cli/issues/493) — that would indicate a
 state genuinely different from the sidebar one.
+
+### The referenceEntity guard covers browser-driven generation only
+
+- **Status:** **Open** — structural, tracked in
+  [#619](https://github.com/ffroliva/gflow-cli/issues/619)
+- **Severity:** Low today · **Affects:** any future direct-wire route that carries
+  `referenceEntities`
+
+`_intercept_reference_entities` strips character entities the caller did not request. As
+of v0.65.0 it **does** run — it never had before
+([#615](https://github.com/ffroliva/gflow-cli/issues/615)), and the fix is A/B-verified
+live (see
+[LIVE_VERIFICATION_reference_entity_guard](https://github.com/ffroliva/gflow-cli/blob/main/docs/LIVE_VERIFICATION_reference_entity_guard.md)).
+
+But it guards by registering a Playwright route handler, so it can only ever observe
+**browser-initiated** traffic. Every direct-wire route goes through `client._post_json`,
+which issues the request via `page.request.post` — Playwright's `APIRequestContext`. Those
+calls leave from the Python side using the browser context's cookies and never enter the
+browser's network stack, so **no route handler observes them, at any level**. This is
+Playwright behaving as designed, not a bug in our usage.
+
+**It does not bite today:** no direct-wire route currently sends `referenceEntities`. It is
+recorded because the coverage gap is invisible from the outside — the guard looks
+comprehensive and is not — and because it is the same fail-open shape as #615 one layer
+down. Any new direct-wire route that carries entity references would inherit the blind spot
+silently.
+
+**No workaround needed today.** If you are adding a direct-wire route that sends
+`referenceEntities`, filter them at the call site rather than relying on the guard.
 
 ### Flow's new full-page media-library UI breaks entity attach (A/B rollout)
 
