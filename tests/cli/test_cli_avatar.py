@@ -122,16 +122,17 @@ class TestAvatarCliEdgeValidation:
         assert "references/ingredients" in result.output
         run.assert_not_awaited()
 
-    def test_video_avatar_rejects_duration_on_a_model_without_the_control(
-        self, tmp_path: Path
-    ) -> None:
+    def test_video_avatar_rejects_a_duration_above_the_model_cap(self, tmp_path: Path) -> None:
+        # Upstream v0.67.0 gave every Veo model a 4/6/8 duration control, so the
+        # rejection boundary is the per-model cap, not "this model has no control":
+        # only omni-flash reaches 10s (max_duration_for).
         with (
             patch("gflow_cli.cli_video._resolve_profile", return_value="default"),
             patch("gflow_cli.cli_video._make_provider_dir", return_value=tmp_path),
             patch("gflow_cli.cli_video._run_avatar_video", new_callable=AsyncMock) as run,
         ):
             result = CliRunner().invoke(
-                video, ["avatar", "p", "--model", "veo-lite", "--duration", "8"]
+                video, ["avatar", "p", "--model", "veo-lite", "--duration", "10"]
             )
 
         assert result.exit_code == 2
