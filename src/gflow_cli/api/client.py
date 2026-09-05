@@ -22,7 +22,7 @@ import time
 import uuid
 from dataclasses import replace as _dataclass_replace
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, NoReturn, Self, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, Self, TypeVar, cast
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import structlog
@@ -777,46 +777,152 @@ class FlowApiClient:
             wait_until="domcontentloaded",
             timeout=60_000,
         )
-        if cached == NOT_REDIRECTED:
-            self._account_locale = None
-            logger.info("client.account_locale_cached", locale=None, settle_skipped=True)
+        # #639: NOT_REDIRECTED means "there is no redirect to wait for". It must not
+        # ALSO mean "do not read the locale" — which is what returning here made it
+        # mean, and that made the state ABSORBING: `_resolve_account_locale` is the
+        # only site of the <html lang> recovery (#643) AND the only caller of
+        # `next_locale_state`, so nothing could ever move a latched profile off it.
+        # Every profile that saw two migrated loads on <=0.66.0 latched this way,
+        # which is exactly the population #643 was written for. Measured 2026-09-03
+        # on `ffroliva`: latched, and the page declares lang="en" on every load.
+        settle = cached != NOT_REDIRECTED
+        self._account_locale, from_url = await self._resolve_account_locale(
+            self._page, settle=settle
+        )
+        if not settle:
+            # Kept (not merged into account_locale_state) because field reports key
+            # on this event to tell "the settle was skipped" from "it timed out".
+            logger.info(
+                "client.account_locale_cached",
+                locale=self._account_locale,
+                settle_skipped=True,
+            )
+            # Do NOT fold this observation into the cache. The cached state answers
+            # ONE question — "does Flow redirect this account?" — and NOT_REDIRECTED
+            # is a true answer here. Writing the <html lang> locale into it would
+            # make `cached != NOT_REDIRECTED` on the next run, turning the settle
+            # back on for good and reintroducing the 4 s URL_SETTLE_TIMEOUT_MS that
+            # #587 removed. Measured on `ffroliva` when this return was missing:
+            # two `transport.url_settle_gave_up` timeouts and a warm bootstrap of
+            # 7.41 s, which `scripts/dev/measure_locale_probe.py` flagged as "warm
+            # arm slower than cold". Re-deriving the locale costs one sub-ms
+            # `page.evaluate` per run, which is strictly cheaper than persisting it.
             return
-        self._account_locale = await self._resolve_account_locale(self._page)
-        state = next_locale_state(cached, self._account_locale)
+        # #639: fold ONLY the URL-derived segment. The cached state answers "does
+        # Flow redirect this account?", and a locale read from `<html lang>` is no
+        # evidence of a redirect — every account declares one. Folding it in made
+        # `next_locale_state` record a segment for an account Flow serves bare,
+        # which switched the settle on permanently and cost the full 4 s
+        # URL_SETTLE_TIMEOUT_MS on every bootstrap thereafter. That shipped in
+        # v0.66.1 with #643's `<html lang>` fallback and is measurable on any
+        # non-redirecting account: `scripts/dev/measure_locale_probe.py` reports
+        # two `transport.url_settle_gave_up` timeouts per run.
+        state = next_locale_state(cached, from_url)
         if state != cached:
             logger.info("client.account_locale_state", was=cached, now=state)
         write_account_locale(self.profile_dir, state)
 
-    async def _resolve_account_locale(self, page: Any) -> str | None:
+    async def _resolve_account_locale(
+        self, page: Any, *, settle: bool = True
+    ) -> tuple[str | None, str | None]:
         """Settle the bootstrap navigation and read the account's locale (#580).
 
         Flow redirects the editor to the ACCOUNT's locale, but that redirect
         lands after ``goto`` returns — settling is what makes it observable.
         ``None`` means "build bare URLs", which is never worse than the
         hardcoded ``en-US`` this replaces.
+
+        Returns ``(locale, from_url)`` — the same segment twice when the URL
+        answered, and ``(lang_segment, None)`` when only ``<html lang>`` did.
+        **The two are not interchangeable** (#639): the caller uses ``locale`` to
+        build URLs, but folds only ``from_url`` into the cached state, because
+        that cache answers "does Flow redirect this account?" and a ``lang``
+        attribute is no evidence of a redirect — every account has one.
+
+        ``settle=False`` (#639) skips only the wait, not the read. A profile
+        cached :data:`NOT_REDIRECTED` has nothing to wait for — measured 60/60 on
+        `ffroliva` — but its page still declares a locale in ``<html lang>``, and
+        skipping the whole function to save the wait is what made that cache an
+        absorbing state.
         """
-        settled = await await_url_settled(page)
+        settled = await await_url_settled(page) if settle else None
         segment = routes.locale_segment_from_url(settled or "")
         if segment is not None:
             logger.info("client.account_locale_resolved", locale=segment, url=settled)
-            return segment
+            return segment, segment
         # #643: the migrated flow.google.com origin serves /project/<id> with no
         # locale segment, so the URL can never answer there — but Flow still
         # renders the account locale into <html lang>. Without this the resolver
         # returns None and `next_locale_state` DEMOTES an already-learned locale
         # to PROVISIONAL (measured: a pt account lost its "pt" on every migrated
         # load). Best-effort: a probe failure must never break navigation.
-        try:
-            lang = await page.evaluate("() => document.documentElement.lang || ''")
-        except Exception as exc:  # noqa: BLE001 - observation only
-            logger.info("client.account_locale_lang_probe_failed", error=type(exc).__name__)
-            lang = None
+        lang = await self._settled_lang(page)
         segment = routes.locale_segment_from_lang_attr(lang)
         if segment is not None:
             logger.info("client.account_locale_resolved", locale=segment, source="html_lang")
-            return segment
+            return segment, None
         logger.info("client.account_locale_unresolved", last_url=settled)
-        return segment
+        return None, None
+
+    #: How long to wait for `<html lang>` to leave the server-default shell value
+    #: (#651). Measured on a pt account, two consecutive loads: the attribute reads
+    #: `en` until ~1.9 s and flips to `pt` at 2.26 / 2.49 s. 4 s leaves margin
+    #: without being open-ended; a slower network could still exceed it, which the
+    #: `lang_unchanged` event makes visible rather than silent.
+    _LANG_SETTLE_TIMEOUT_MS: ClassVar[float] = 4_000.0
+
+    async def _settled_lang(self, page: Any) -> str | None:
+        """Read ``<html lang>`` only after hydration has had a chance to set it (#651).
+
+        Flow serves an **`en` shell** and the app rewrites ``lang`` during
+        hydration, so a single early read returns ``en`` for every account. That is
+        not a migrated-origin quirk — it was measured on the OLD host:
+
+        ===========  ==========  ==============
+        t (ms)       ``lang``    ``readyState``
+        ===========  ==========  ==============
+        887          ``en``      interactive
+        1510         ``en``      **complete**
+        2092         ``en``      complete
+        **2488**     **``pt``**  complete
+        ===========  ==========  ==============
+
+        **``readyState`` is not a usable signal** — it reaches ``complete`` a full
+        second *before* the flip, so the obvious "wait for complete, then read" is
+        wrong. The DOM node count oscillates (136 → 300 → 249 → 251) and does not
+        discriminate either. Nothing cheap predicts the flip, so this observes it.
+
+        Cost: an account whose real locale IS the shell default never changes the
+        attribute and pays the full timeout once per process. That is the price of
+        not guessing, and it is bounded; the alternative shipped a wrong locale for
+        every account whose URL could not answer.
+        """
+        try:
+            first = await page.evaluate("() => document.documentElement.lang || ''")
+        except Exception as exc:  # noqa: BLE001 - observation only
+            logger.info("client.account_locale_lang_probe_failed", error=type(exc).__name__)
+            return None
+        try:
+            await page.wait_for_function(
+                "initial => (document.documentElement.lang || '') !== initial",
+                arg=first,
+                timeout=self._LANG_SETTLE_TIMEOUT_MS,
+            )
+            after = await page.evaluate("() => document.documentElement.lang || ''")
+        except Exception as exc:  # noqa: BLE001 - a timeout is an ANSWER, not a failure
+            # Either the account's locale genuinely equals the shell default, or the
+            # page never hydrated within the window. Both leave the first read as the
+            # best available answer — which is exactly the pre-#651 behaviour, so this
+            # branch can never be worse than what it replaces.
+            logger.info(
+                "client.account_locale_lang_unchanged",
+                lang=first,
+                waited_ms=self._LANG_SETTLE_TIMEOUT_MS,
+                reason=type(exc).__name__,
+            )
+            return first
+        logger.info("client.account_locale_lang_settled", was=first, now=after)
+        return after
 
     async def _launch_persistent_context(self, kwargs: JsonObject) -> BrowserContext:
         """Launch the persistent context; translate a launch-time crash into ProfileLockedError."""
