@@ -96,6 +96,7 @@ class LikenessEligibility:
         return cls(eligible=not reasons, determined=True, reasons=reasons)
 
 
+@dataclass(frozen=True)
 class CreditsInfo:
     """Current Flow balance and account tier returned by ``GET /v1/credits``."""
 
