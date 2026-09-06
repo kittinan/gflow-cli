@@ -43,9 +43,13 @@ def test_migrated_can_serve_takes_r2v_from_local_files_only() -> None:
     # nothing to anchor on — and nothing to assert on the submit body.
     assert _unported_form(_r2v(ref_names=("product1.png",))) is not None
     assert not migrated_can_serve(_r2v(ref_names=("product1.png",)), "p1")
-    # Character entities are a different attach surface (a chip with an entity_id, in a
-    # different wire slot) and stay on labs.
-    assert not migrated_can_serve(_r2v(reference_entities=("abc",)), "p1")
+    # Characters attach by mention, searched by DISPLAY NAME — without one there is
+    # nothing to type, and a t2v carrying entities used to pass this gate untouched and
+    # generate WITHOUT the character.
+    assert _unported_form(_r2v(reference_entities=("abc",))) is not None
+    assert _unported_form(_r2v(reference_entities=("abc",), reference_entity_names=("Tun",))) is (
+        None
+    )
     # A fresh project is still labs-only, so the gate keeps requiring one here.
     assert not migrated_can_serve(_r2v(reference_images=(Path("a.png"),)), None)
 
@@ -141,11 +145,17 @@ class FakeComposerPage:
         self.upload_button = upload_button
         self.upload_clicked = 0
         self.composer_clicks = 0
+        self.chip_kind: tuple[str, str] = ("media", "")
 
     def on_enter(self) -> None:
+        kind, entity_id = self.chip_kind
         for _ in range(self.chips_per_enter):
             self.chips.append(
-                {"text": f"asset{len(self.chips)}", "entity_id": "", "reference_type": "media"}
+                {
+                    "text": f"asset{len(self.chips)}",
+                    "entity_id": entity_id,
+                    "reference_type": kind,
+                }
             )
 
     def locator(self, css: str) -> FakeLoc:
@@ -203,3 +213,48 @@ async def test_the_prompt_is_appended_so_the_mentions_survive() -> None:
     await MigratedComposer().send_prompt(page, "a woman holding it", append=True)
     assert page.composer_clicks == 0
     assert "a woman holding it" in page.typed
+
+
+# --- characters -------------------------------------------------------------
+
+
+def test_a_t2v_carrying_a_character_is_not_waved_through_as_plain_text() -> None:
+    """The expensive pre-existing hole: `video t2v --reference-entity <id>` on a moved
+    account passed the gate as an ordinary t2v, attached nothing, and generated a
+    full-price clip with no character on it. `migrated_can_serve` did refuse entities,
+    but that only gates UNMOVED accounts — a moved one is routed by URL and never asks."""
+    from gflow_cli.api.transports.migrated_composer import _unported_form
+
+    bare = GenerateVideoRequest(prompt="hi", mode=Mode.T2V, reference_entities=("ent-1",))
+    assert _unported_form(bare) is not None
+
+    named = GenerateVideoRequest(
+        prompt="hi",
+        mode=Mode.T2V,
+        reference_entities=("ent-1",),
+        reference_entity_names=("Tun",),
+    )
+    assert _unported_form(named) is None
+
+
+async def test_a_character_mention_must_carry_the_id_that_was_asked_for() -> None:
+    """Searching is by display name, but the chip carries the entity id — so a name that
+    resolves to some other asset is caught. Recon hit exactly this: a query of "me"
+    matched an avatar named "Me"."""
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakeComposerPage()
+    page.chip_kind = ("likeness", "someone-else")
+    with pytest.raises(ReferenceNotFoundError) as exc_info:
+        await MigratedComposer().attach_entities(page, (("ent-1", "Tun"),))
+    message = str(exc_info.value)
+    assert "ent-1" in message and "Tun" in message
+
+
+async def test_a_matching_character_attaches() -> None:
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakeComposerPage()
+    page.chip_kind = ("entity", "ent-1")
+    ids = await MigratedComposer().attach_entities(page, (("ent-1", "Tun"),))
+    assert ids == ("ent-1",)

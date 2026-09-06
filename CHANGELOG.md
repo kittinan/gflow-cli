@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`video t2v --reference-entity` silently dropped the character on the migrated host,
+  and billed for it** (#639). A t2v carrying `reference_entities` passed `_unported_form`
+  untouched — the mode check returned "supported" before anything looked at the entities —
+  so the run attached nothing and generated a full-price clip with no character on it.
+  `migrated_can_serve` did refuse entities, but that only gates accounts Flow has **not**
+  moved; a moved one is routed by its URL and never asks. Nothing downstream caught it
+  either: the submit-body assertion only arms for i2v frames and r2v references.
+
+  Characters now attach, as `@` mentions in the Ingredients sub-mode like any other
+  reference. The picker is searched by display name, so `--reference-entity-name` is now
+  **required** alongside `--reference-entity` (without one there is nothing to type), and
+  the chip the picker inserts is checked to carry the `data-entity-id` that was actually
+  asked for — a name alone is not enough, since two characters can share one and a query
+  can match an avatar instead. The submit body is then asserted to carry the id, and a run
+  whose characters have not all attached is refused before submit.
+
 ### Added
 
 - **`gflow video r2v` from local `--ref` files runs on the migrated `flow.google.com`

@@ -66,8 +66,11 @@ Two details are load-bearing: the Ingredients submit is rpcid **`MZZa6b`** (t2v 
 leaves the picker open and inserts nothing. The submit body is asserted to carry every
 uploaded id, and a run whose references have not all attached is refused **before**
 submit, because the failure mode is a full-price clip with none of them on it.
-References by `@Name` and character entities stay on labs, for the same reason a frame by
-UUID does: the picker exposes no media id to anchor on. Capture:
+References by `@Name` stay on labs, for the same reason a frame by UUID does: the picker
+exposes no media id to anchor on. **Characters DO work** — they attach as mentions, so
+`--reference-entity` requires `--reference-entity-name` to search the picker by, and the
+chip is verified to carry the requested entity id. Before this, a `t2v` carrying an entity
+passed the host gate untouched and generated a full-price clip *without* the character. Capture:
 [2026-09-05-migrated-r2v-attach-surface](docs/superpowers/spikes/2026-09-05-migrated-r2v-attach-surface.md).
 
 **Models on the migrated host.** Its picker is driven for every tier the account's

@@ -202,15 +202,20 @@ def _unported_form(request: GenerateVideoRequest) -> str | None:
     start frame only: the Frames picker on this host lists assets by display name
     with no UUID in its DOM (2026-09-05 spike), so a frame given by media UUID or
     ``@Name`` has nothing to anchor on yet, and the End chip is unmeasured."""
+    if request.reference_entities:
+        # A character attaches by MENTION, searched by display name — the picker offers
+        # no id to anchor on, exactly as the frame picker does not. Without a name there
+        # is nothing to type, so the run would silently generate WITHOUT the character:
+        # a t2v with entities used to pass this gate untouched and do just that.
+        if len(request.reference_entity_names) != len(request.reference_entities):
+            return "character references without a matching --reference-entity-name"
+        return None
     if request.mode is Mode.T2V:
         return None
     if request.mode is Mode.R2V:
         # Local files only, for the same reason i2v is: the picker lists assets by
         # display name and exposes no media id, so a reference gflow did not upload
-        # itself has nothing to anchor on. Character entities are a different attach
-        # surface (a chip with an entity_id, in a different wire slot) and unported.
-        if request.reference_entities:
-            return "character references"
+        # itself has nothing to anchor on.
         if not request.reference_images:
             return "references given by name rather than a local file"
         return None
@@ -402,7 +407,7 @@ class MigratedComposer:
                 # Frames renders the Start/End chips the attach stage binds to. Flow
                 # remembers the last submode per account, so it is set, not assumed.
                 await self._select(page, pane, axis="submode", lig=FRAMES_LIGATURE)
-            if request.mode is Mode.R2V:
+            if request.mode is Mode.R2V or request.reference_entities:
                 # Ingredients is where references live, and the app derives the r2v model
                 # key from this plus the picker choice — the same run sends
                 # veo_3_1_r2v_lite_low_priority here and veo_3_1_lite_low_priority under
@@ -789,6 +794,36 @@ class MigratedComposer:
             await self._mention_by_name(page, path.name, expect_chips=i + 1)
         log.info("migrated.references_attached", count=len(paths), media_ids=media_ids)
         return tuple(media_ids)
+
+    async def attach_entities(
+        self, page: Page, entities: tuple[tuple[str, str], ...]
+    ) -> tuple[str, ...]:
+        """Mention each ``(entity_id, display_name)`` character, verifying the id.
+
+        Searching is by display name — the picker offers nothing else — but the chip it
+        inserts carries ``data-entity-id``, so the pick is checked against the id the
+        caller asked for rather than trusting the name. That matters: during recon a
+        query of ``"me"`` matched an avatar named "Me" instead of the intended asset, and
+        two characters may share a display name (the labs path addresses tiles by id for
+        the same reason).
+        """
+        await self.clear_composer(page)
+        for i, (entity_id, name) in enumerate(entities):
+            await self._mention_by_name(page, name, expect_chips=i + 1)
+            chip = (await self.read_chips(page))[-1]
+            if chip["reference_type"] != "entity" or chip["entity_id"] != entity_id:
+                raise ReferenceNotFoundError(
+                    detail=(
+                        f"migrated host: {name!r} resolved to "
+                        f"{chip['reference_type'] or 'nothing'} "
+                        f"{chip['entity_id'] or chip['text']!r}, not the character "
+                        f"{entity_id} that was asked for — the picker matched a "
+                        f"different asset with that name"
+                    ),
+                )
+        ids = tuple(e for e, _ in entities)
+        log.info("migrated.entities_attached", count=len(ids), entity_ids=list(ids))
+        return ids
 
     async def clear_composer(self, page: Page) -> None:
         await page.locator(COMPOSER).first.click(timeout=5000)
@@ -1261,15 +1296,23 @@ async def run_video(
         media_id = await composer.attach_start_frame(page, pid, frame)
     if request.mode is Mode.R2V:
         reference_ids = await composer.attach_references(page, pid, request.reference_images)
+    if request.reference_entities:
+        # A character run is an Ingredients run on this host whatever the caller's mode
+        # says: the app sends a `_r2v_` model key for it, so it is asserted like one.
+        reference_ids = await composer.attach_entities(
+            page,
+            tuple(zip(request.reference_entities, request.reference_entity_names, strict=True)),
+        )
     # The prompt is appended for r2v: the mentions are already in the document and
     # clicking the composer would move the caret away from where the last one left it.
-    await composer.send_prompt(page, request.prompt, append=request.mode is Mode.R2V)
-    if request.mode is Mode.R2V:
+    staged = len(reference_ids)
+    await composer.send_prompt(page, request.prompt, append=bool(staged))
+    if staged:
         attached = await composer.read_chips(page)
-        if len(attached) != len(request.reference_images):
+        if len(attached) != staged:
             raise ReferenceNotFoundError(
                 detail=(
-                    f"migrated host: {len(request.reference_images)} reference(s) requested "
+                    f"migrated host: {staged} reference(s) requested "
                     f"but {len(attached)} on the prompt at submit time — refusing to spend "
                     f"credits on a run that would ignore them"
                 ),
