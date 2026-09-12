@@ -31,6 +31,7 @@ __all__ = [
     "FlowAgentUiError",
     "FlowApiError",
     "FlowAppError",
+    "FlowAccountChooserError",
     "FlowHostMigratedError",
     "FrameExtractionError",
     "GFlowError",
@@ -648,10 +649,18 @@ class ExtendUnavailableError(GFlowError):
 
 
 class UiSelectorDriftError(GFlowError):
-    """Raised when a UI-automation selector cascade finds no matching element.
+    """Raised when a UI-automation selector cascade cannot reach the control it needs.
+
+    Two shapes, and the second is easy to forget: the selector **finds nothing**, or it
+    finds the element and the element **will not take the interaction** — occluded,
+    disabled, or never holding still (#593's blocked overlay, #776's click that expired
+    while the control read visible and enabled). Both mean the same thing to a caller —
+    gflow cannot drive this control — which is why they share an exit code, and why the
+    ``detail`` has to say which one happened.
 
     Indicates that Flow's frontend has changed in a way that invalidates one
-    of the selector probes (mode-switch trigger, mode tab, sub-mode tab, etc.).
+    of the selector probes (mode-switch trigger, mode tab, sub-mode tab, etc.),
+    or that something on the page is in the way.
     The ``detail`` names the probe label and includes the debug screenshot or
     diagnostics JSON path when one was captured.
 
@@ -671,6 +680,49 @@ class UiSelectorDriftError(GFlowError):
         "this message, plus the incident bundle's report.md when one was written "
         "(review artifacts before sharing — screenshots may show your account "
         "name/avatar; do NOT include tokens or signed URLs)."
+    )
+
+
+class InsufficientCreditsError(GFlowError):
+    """Raised when Flow refuses a generation because the account is short of credits.
+
+    **Short of, not necessarily out of.** Veo tiers cost different amounts, so the
+    threshold is per-model: measured 2026-09-07, `ci-probe` held **50** credits and
+    still rendered the warning. An empty balance is one way to reach this; an
+    expensive model on a partial balance is another, and the error must not tell a
+    user with credits that they have none.
+
+    Flow does not disable the submit control when the balance falls short — it
+    **replaces** it. The ``arrow_forward`` anchor disappears and a
+    ``prompt-warning-button`` carrying ``aria-label='Insufficient credits warning'``
+    takes its place (note Flow's own word: *insufficient*, not *none*). Measured by
+    A/B on 2026-09-07 on the migrated host: same probe, same code, ~60 s apart, a
+    short account and a funded one rendering the mirror image of each other.
+
+    Finding: ``docs/superpowers/spikes/2026-09-07-credit-shortfall-looks-like-selector-drift.md``.
+
+    That is why this class exists rather than reusing
+    :class:`UiSelectorDriftError`. A missing anchor was being reported as "Google may
+    have updated their frontend — file a bug", over a credit shortfall: a wrong diagnosis
+    pointed at a wrong culprit, which also manufactures frontend-drift reports that no
+    code change can ever fix. Exit code 37 lets a scripted caller branch on "top up the
+    account" versus "the UI moved" (23), which is the whole point of separating them.
+
+    Nothing is submitted when this is raised, so no credit is spent — there were none
+    to spend.
+    """
+
+    problem_type = "https://gflow-cli.dev/errors/insufficient-credits"
+    title = "Insufficient Flow credits"
+    _default_remediation = (
+        "Your Google account does not have enough Flow credits for this model, so Flow "
+        "replaced the submit control with its 'Insufficient credits' warning. This is a "
+        "shortfall, not necessarily an empty balance: Veo tiers cost different amounts "
+        "(measured 2026-09-07: an account holding 50 credits still saw the warning), so "
+        "a cheaper model may go through. Check the balance with `gflow credits user`, "
+        "then try a cheaper `--model`, top up, or wait for your allowance to reset. "
+        "Image generation (`gflow image`) draws on a separate daily quota and may still "
+        "work. This is not a gflow-cli bug and does not need a report."
     )
 
 
@@ -696,20 +748,48 @@ class FlowAgentUiError(GFlowError):
 
 
 class FlowAppError(GFlowError):
-    """Raised when Google Flow's web app itself crashed — a client-side exception
-    (its React error boundary), not a gflow-cli issue. The editor never rendered,
-    so no generation control exists to drive. **Transient and retryable** (exit
-    code 31). Detected at the mode-switch raise site via the Flow error-page title,
-    which otherwise surfaces as a misleading ``UiSelectorDriftError`` "file a bug".
+    """Raised when Google Flow's own app did not give us the page we asked for —
+    not a gflow-cli issue. Either way the editor never rendered, so no generation
+    control exists to drive (exit code 31). **Two measured shapes:**
+
+    1. **Its React error boundary** — the app crashed client-side. Transient;
+       retry works. Detected at the mode-switch raise site via the error-page title.
+    2. **A redirect to Flow's public landing page** (``/about``, #756) — the app
+       declined to open the project for this session. *Why* is still not measured:
+       ``gflow auth status`` reports the session verified while it happens, so the
+       message names the redirect and stops rather than inventing a cause. Whether a
+       retry helps **is** now measured, on a live occurrence caught 2026-09-11: 5/5
+       consecutive attempts landed on ``/about``, over ~3 minutes, on the account's
+       own project with a healthy session — so ``retryable=False`` at that raise site
+       is the measured answer, not the preserved one it was through 2026-09-10.
+       Excluded by that run, narrowly: not an expired session, not a missing project,
+       not transience. Still open: the cause, and whether it ever clears.
+
+    Both otherwise surface as a misleading ``UiSelectorDriftError`` "file a bug" —
+    which is the whole reason this class exists. See
+    ``api/transports/_common.py::raise_if_known_landing``.
     """
 
     problem_type = "https://gflow-cli.dev/errors/flow-app"
     title = "Google Flow web app error"
+
+    #: Per-instance override of this class's ``RETRYABLE_ERRORS`` membership; ``None``
+    #: keeps it. It lives HERE and not on ``GFlowError`` because there is exactly one
+    #: producer (``_common.py::raise_if_known_landing``) and one class with two shapes
+    #: that disagree about retrying. ``is_retryable`` reads it by ``getattr``, so a base
+    #: declaration would buy no typing and no test-double visibility — only a field on
+    #: every error in the project. Move it up if, and only if, a second class needs it.
+    retryable: bool | None = None
     _default_remediation = (
-        "Google Flow's web app failed to load (a client-side exception on "
-        "labs.google) — a transient Flow-side error, not a gflow-cli bug. Retry in a "
-        "moment; if it persists, check https://labs.google/fx and try a fresh session."
+        "Google Flow did not serve the page gflow asked for — a Flow-side condition, "
+        "not a gflow-cli bug. If it crashed (client-side exception), retry in a moment. "
+        "If it redirected to flow.google.com/about, open the project in a browser on "
+        "that host and confirm this account can reach it."
     )
+
+    def __init__(self, *args: Any, retryable: bool | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.retryable = retryable
 
 
 class FlowHostMigratedError(GFlowError):
@@ -718,8 +798,10 @@ class FlowHostMigratedError(GFlowError):
 
     The migrated frontend is a different build (Angular Material over
     ``batchexecute``): the labs drivers' ligature selectors miss there at once. The
-    migrated composer drives it for text-to-video; every other request still lands
-    here. That is NOT selector rot, and reporting it as
+    migrated composer drives it for text-to-video, image-to-video and
+    reference-to-video from local files, text-to-image, and image-to-image from
+    local files; every other request still lands here. That is NOT selector rot,
+    and reporting it as
     :class:`UiSelectorDriftError` (exit 23, "file a bug about the selector") sent
     operators hunting for the wrong cause.
 
@@ -737,8 +819,10 @@ class FlowHostMigratedError(GFlowError):
     title = "Flow served the migrated flow.google.com frontend"
     _default_remediation = (
         "Google has moved this account's Flow from labs.google to flow.google.com. "
-        "gflow drives that frontend for text-to-video and for image-to-video from a "
-        "local --initial-frame (no end frame, no UUID or @Name frame; --project required) "
+        "gflow drives that frontend for text-to-video, image-to-video from a local "
+        "--initial-frame, reference-to-video from local --ref files, text-to-image, "
+        "and image-to-image from local files (no end frame, no UUID or @Name frame, "
+        "no character entities; --project required) "
         "(GFLOW_CLI_FLOW_HOST=auto, the default, or flow.google.com); you see this "
         "error because GFLOW_CLI_FLOW_HOST=labs.google switched the migrated composer "
         "off, or because this request type is not ported to the migrated host yet. "
@@ -746,6 +830,23 @@ class FlowHostMigratedError(GFlowError):
         "land the old frontend. The REST surface (gflow project list, gflow data ...) "
         "still works. Follow https://github.com/ffroliva/gflow-cli/issues/639 for "
         "the migrated-frontend feature matrix."
+    )
+
+
+class FlowAccountChooserError(GFlowError):
+    """Raised when Google Flow lands on an account chooser or sign-in hop
+    and the profile's recorded Google account cannot be selected automatically.
+
+    **Not retryable** (exit code 38). Retrying with the same profile and recorded
+    account into a signed-out or missing chooser row cannot succeed without
+    manual operator interaction via gflow auth login.
+    """
+
+    problem_type = "https://gflow-cli.dev/errors/flow-account-chooser"
+    title = "Recorded Google account not selectable"
+    _default_remediation = (
+        "Run `gflow auth login --profile <name>` and complete the account chooser "
+        "manually while signed in as the recorded account."
     )
 
 
@@ -959,9 +1060,10 @@ class AuthBrowserRejectedError(GFlowError):
     problem_type = "https://gflow-cli.dev/errors/auth-browser-rejected"
     title = "Login browser rejected"
     _default_remediation = (
-        "Google rejected Playwright's bundled Chromium as an insecure browser. "
-        "Install Google Chrome and rerun `gflow auth login --browser chrome`, "
-        "or set GFLOW_CLI_AUTH_BROWSER=chrome so future logins use real Chrome."
+        "Google's sign-in rejected this browser for advertising automation "
+        "(navigator.webdriver), not for being Chromium. Re-run `gflow auth login`; "
+        "with Google Chrome installed, the `chrome` strategy retries automatically "
+        "on a path with no automation surface."
     )
 
 
@@ -1220,12 +1322,14 @@ EXIT_CODE_MAP: dict[type[GFlowError], int] = {
     # Direct GFlowError subclass; exit 23 lets scripts distinguish "UI drifted"
     # from generic error (1) without parsing stderr.
     UiSelectorDriftError: 23,
+    InsufficientCreditsError: 37,
     # AvatarUnavailableError: Flow's Avatar/likeness is verified-identity +
-    # region gated. Direct GFlowError subclass; exit 37 lets scripts branch on
+    # region gated. Direct GFlowError subclass; exit 39 lets scripts branch on
     # "this account cannot use Avatar at all" versus a selector-drift (23) that
-    # a gflow update could fix. Deliberately NOT retryable. (37, not the 35 this
-    # fork first used: upstream v0.65.0 claimed 35 for ExtendUnavailableError.)
-    AvatarUnavailableError: 37,
+    # a gflow update could fix. Deliberately NOT retryable. (39, not the 35/37
+    # this fork used earlier: upstream claimed 35 for ExtendUnavailableError and
+    # 37 for InsufficientCreditsError.)
+    AvatarUnavailableError: 39,
     # ModelModeIncompatibilityError + VideoModelSelectionError BEFORE
     # ConfigurationError (their parent) so the isinstance walk lands on 17/18,
     # not 11. Per [[exit-code-map-ordering-invariant-test-pitfall]].
@@ -1242,6 +1346,11 @@ EXIT_CODE_MAP: dict[type[GFlowError], int] = {
     # frontend" (per-account, not retryable) from genuine selector drift
     # (23), which it used to masquerade as.
     FlowHostMigratedError: 36,
+    # FlowAccountChooserError: Google Flow landed on account chooser
+    # and the recorded account row could not be selected automatically.
+    # Direct GFlowError subclass; exit 38 distinguishes account chooser stall
+    # from generic errors (1) without parsing stderr.
+    FlowAccountChooserError: 38,
     # UiModeUnavailableError (issue #299): a command's required arm (--ui-mode /
     # inferred) couldn't be reached after a best-effort switch. Direct GFlowError
     # subclass — retryable policy abort, distinct from FlowAgentUiError (25).
@@ -1313,5 +1422,18 @@ RETRYABLE_ERRORS: tuple[type[GFlowError], ...] = (
 
 
 def is_retryable(exc: GFlowError) -> bool:
-    """Shared retry classification consumed by every machine-readable error surface."""
+    """Shared retry classification consumed by every machine-readable error surface.
+
+    The class answer (``RETRYABLE_ERRORS``) unless the raise site overrode it — see
+    ``FlowAppError.retryable``.
+
+    ``isinstance(..., bool)`` rather than a truthiness test, deliberately: a
+    ``MagicMock`` answers every ``getattr`` with a truthy child mock, so
+    ``if override is not None`` would silently report **every** mocked error as
+    retryable and no assertion in the suite would notice
+    (memory ``magicmock-truthy-getattr-silences-guards``).
+    """
+    override = getattr(exc, "retryable", None)
+    if isinstance(override, bool):
+        return override
     return isinstance(exc, RETRYABLE_ERRORS)

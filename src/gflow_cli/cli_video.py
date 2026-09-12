@@ -138,7 +138,7 @@ def _shared_gen_tail_options(f: Any) -> Any:
                 "--output",
                 "output_file",
                 default=None,
-                type=click.Path(path_type=Path),
+                type=click.Path(dir_okay=False, path_type=Path),
                 help="Explicit output file path for the generated asset.",
             ),
             click.option(
@@ -1560,7 +1560,7 @@ def i2v(  # NOSONAR
     "-o",
     "--output",
     "output_file",
-    type=click.Path(path_type=Path),
+    type=click.Path(dir_okay=False, path_type=Path),
     default=None,
     help="Explicit output file path for the generated asset.",
 )
@@ -1680,7 +1680,7 @@ def _reject_avatar_model_without_references(model: str | None) -> None:
         "through Flow's own Add Media dialog, which is what makes Flow attach "
         "`referenceLikenesses` to the request.\n\n"
         "AVAILABILITY: Flow gates Avatar on identity verification AND region. "
-        "gflow checks eligibility before generating and aborts with exit 37 "
+        "gflow checks eligibility before generating and aborts with exit 39 "
         "(no credits spent) when the account cannot use it. Confirm the Avatar "
         "tab works in Flow's web UI first if you are unsure.\n\n"
         "\b\n"
@@ -1864,7 +1864,7 @@ def avatar(
     "-o",
     "--output",
     "output_file",
-    type=click.Path(path_type=Path),
+    type=click.Path(dir_okay=False, path_type=Path),
     default=None,
     help="Explicit output file path for the generated chain clips.",
 )

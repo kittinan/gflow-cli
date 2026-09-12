@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from gflow_cli.api.transports.migrated_composer import FRAME_SEARCH_ATTEMPTS
 from gflow_cli.api.video import Aspect, GenerateVideoRequest, Mode
 from gflow_cli.errors import ReferenceNotFoundError
 
@@ -43,13 +44,9 @@ def test_migrated_can_serve_takes_r2v_from_local_files_only() -> None:
     # nothing to anchor on — and nothing to assert on the submit body.
     assert _unported_form(_r2v(ref_names=("product1.png",))) is not None
     assert not migrated_can_serve(_r2v(ref_names=("product1.png",)), "p1")
-    # Characters attach by mention, searched by DISPLAY NAME — without one there is
-    # nothing to type, and a t2v carrying entities used to pass this gate untouched and
-    # generate WITHOUT the character.
-    assert _unported_form(_r2v(reference_entities=("abc",))) is not None
-    assert _unported_form(_r2v(reference_entities=("abc",), reference_entity_names=("Tun",))) is (
-        None
-    )
+    # Character entities are a different attach surface (a chip with an entity_id, in a
+    # different wire slot) and stay on labs.
+    assert not migrated_can_serve(_r2v(reference_entities=("abc",)), "p1")
     # A fresh project is still labs-only, so the gate keeps requiring one here.
     assert not migrated_can_serve(_r2v(reference_images=(Path("a.png"),)), None)
 
@@ -71,6 +68,57 @@ def test_a_submit_that_lost_the_references_is_a_wire_problem() -> None:
     assert problem is not None and "missing 1 of 1" in problem
 
     assert "could not be read" in (_r2v_body_problem("", "MZZa6b", ("x",)) or "")
+
+    # The migrated host's t2v key carries no mode infix at all, and it is the key the
+    # r2v diagnostic most needs to name: it is what the body says when the picker
+    # inserted nothing. A mode-only MODEL_KEY reported "no model key" here.
+    bare = '["veo_3_1_lite_lower_priority", "aaaaaaaa-1111-2222-3333-444444444444"]'
+    problem = _r2v_body_problem(bare, "MZZa6b", ("aaaaaaaa-1111-2222-3333-444444444444",))
+    assert problem is not None and "veo_3_1_lite_lower_priority" in problem
+
+
+def test_a_t2v_key_carrying_a_duration_names_the_duration_as_the_cause() -> None:
+    """The measured cause of a degraded r2v submit, not a guess: below 8s this host
+    flattens the mentions and goes out as t2v. "No reference was bound" on its own sent
+    the first reporter reading the attach code, which was working correctly."""
+    from gflow_cli.api.transports.migrated_composer import _r2v_body_problem
+
+    ref = "aaaaaaaa-1111-2222-3333-444444444444"
+    degraded = f'["veo_3_1_t2v_lite_4s_low_priority", "{ref}"]'
+    problem = _r2v_body_problem(degraded, "MZZa6b", (ref,))
+    assert problem is not None
+    assert "veo_3_1_t2v_lite_4s_low_priority" in problem
+    assert "only at 8s" in problem and "--duration" in problem
+
+    # A t2v key with no duration segment is a different fault and must not blame duration.
+    plain = f'["veo_3_1_lite_lower_priority", "{ref}"]'
+    other = _r2v_body_problem(plain, "MZZa6b", (ref,))
+    assert other is not None and "only at 8s" not in other
+
+
+def test_the_submit_body_is_form_decoded_before_it_is_quoted_back() -> None:
+    """`batchexecute` sends `f.req=<percent-encoded JSON>`. Raw, the key reads as
+    `%5C%22veo_...%5C%22` and a real run quoted it back to the user as
+    `22veo_3_1_t2v_lite_4s_low_priority`."""
+    from gflow_cli.api.transports.migrated_composer import _post_data
+
+    class _Req:
+        post_data = (
+            "f.req=%5B%5B%5B%22MZZa6b%22%2C%22%5B%5C%22veo_3_1_r2v_lite%5C%22%5D%22%5D%5D%5D"
+        )
+
+    body = _post_data(_Req())
+    # The nested JSON keeps its own backslash escapes; what must be gone is the percent
+    # encoding, whose `%5C%22` is what MODEL_KEY was matching as a leading "22".
+    assert "%5C%22" not in body and "%22" not in body
+    assert "veo_3_1_r2v_lite" in body and body.startswith('f.req=[[["MZZa6b"')
+
+    class _Boom:
+        @property
+        def post_data(self) -> str:
+            raise RuntimeError("undecodable bytes")
+
+    assert _post_data(_Boom()) == ""  # a listener must never raise
 
 
 def test_submit_rpcs_cover_the_ingredients_submit() -> None:
@@ -136,6 +184,7 @@ class FakeComposerPage:
         assets: list[str] | None = None,
         chips_per_enter: int = 1,
         upload_button: bool = True,
+        miss_first: int = 0,
     ) -> None:
         self.keyboard = FakeKeyboard(self)
         self.typed: list[str] = []
@@ -143,19 +192,20 @@ class FakeComposerPage:
         self.assets = assets if assets is not None else ["me.jpgImage"]
         self.chips_per_enter = chips_per_enter
         self.upload_button = upload_button
+        #: How many leading ENTERs insert nothing — the search index not yet holding a
+        #: fresh upload, which `_pick_frame_by_name` already retries through.
+        self.miss_first = miss_first
+        self.enters = 0
         self.upload_clicked = 0
         self.composer_clicks = 0
-        self.chip_kind: tuple[str, str] = ("media", "")
 
     def on_enter(self) -> None:
-        kind, entity_id = self.chip_kind
+        self.enters += 1
+        if self.enters <= self.miss_first:
+            return
         for _ in range(self.chips_per_enter):
             self.chips.append(
-                {
-                    "text": f"asset{len(self.chips)}",
-                    "entity_id": entity_id,
-                    "reference_type": kind,
-                }
+                {"text": f"asset{len(self.chips)}", "entity_id": "", "reference_type": "media"}
             )
 
     def locator(self, css: str) -> FakeLoc:
@@ -172,7 +222,7 @@ class FakeComposerPage:
     async def wait_for_timeout(self, _ms: float) -> None:
         return None
 
-    async def evaluate(self, _script: str) -> Any:
+    async def evaluate(self, _script: str, _arg: Any = None) -> Any:
         return self.chips
 
 
@@ -191,6 +241,40 @@ async def test_each_reference_must_land_as_its_own_chip() -> None:
     assert len(page.chips) == 2
 
 
+async def test_a_picker_that_misses_the_first_query_is_retried() -> None:
+    """Same measured failure `_pick_frame_by_name` retries through: the asset search is
+    server-side and does not always index a fresh upload by the first query. One query
+    behind a fixed wait would fail a reference that is merely late."""
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakeComposerPage(miss_first=1)
+    await MigratedComposer()._mention_by_name(page, "me.jpg", expect_chips=1)  # noqa: SLF001
+    assert page.enters == 2 and len(page.chips) == 1
+    # The failed query is backspaced out before re-querying, or the composer keeps a
+    # literal "@me.jpg" alongside the chip that eventually lands.
+    assert page.typed.count("<Backspace>") == len("me.jpg") + 1
+
+
+async def test_a_retry_that_would_eat_an_attached_chip_refuses_instead() -> None:
+    """Backspacing the failed query is a fixed keystroke count, and a chip is deleted by
+    one Backspace. If the clean-up takes a reference someone already attached, the prompt
+    is no longer the one that was built — abandon rather than submit a silently different
+    generation."""
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakeComposerPage(miss_first=99)
+    page.chips = [{"text": "first", "entity_id": "", "reference_type": "media"}]
+
+    async def eat_a_chip(_script: str, _arg: Any = None) -> Any:
+        if page.typed.count("<Backspace>"):
+            page.chips = []
+        return page.chips
+
+    page.evaluate = eat_a_chip  # type: ignore[method-assign]
+    with pytest.raises(ReferenceNotFoundError, match="already-attached reference"):
+        await MigratedComposer()._mention_by_name(page, "second.png", expect_chips=2)  # noqa: SLF001
+
+
 async def test_a_reference_that_does_not_attach_is_refused_before_submit() -> None:
     """The picker silently inserting nothing is the failure mode that would otherwise
     generate — and bill — a clip with none of the user's references on it."""
@@ -202,6 +286,7 @@ async def test_a_reference_that_does_not_attach_is_refused_before_submit() -> No
     message = str(exc_info.value)
     assert "me.jpg" in message
     assert "somethingelse" in message  # says what the picker DID offer
+    assert page.enters == FRAME_SEARCH_ATTEMPTS  # every attempt spent before giving up
 
 
 async def test_the_prompt_is_appended_so_the_mentions_survive() -> None:
@@ -215,46 +300,92 @@ async def test_the_prompt_is_appended_so_the_mentions_survive() -> None:
     assert "a woman holding it" in page.typed
 
 
-# --- characters -------------------------------------------------------------
+# --- character entities (#723) ----------------------------------------------
 
 
-def test_a_t2v_carrying_a_character_is_not_waved_through_as_plain_text() -> None:
-    """The expensive pre-existing hole: `video t2v --reference-entity <id>` on a moved
-    account passed the gate as an ordinary t2v, attached nothing, and generated a
-    full-price clip with no character on it. `migrated_can_serve` did refuse entities,
-    but that only gates UNMOVED accounts — a moved one is routed by URL and never asks."""
+class FakeEntityPage(FakeComposerPage):
+    """A composer whose picker commits CHARACTER ENTITIES rather than media.
+
+    Modelled on the 2026-09-07 capture: `@` + the character's name + Enter inserts
+    ``<span class="mention-chip" data-reference-type="entity" data-entity-id="...">``,
+    and the aborted ``MZZa6b`` submit carried that id in its own reference slot.
+    """
+
+    def __init__(self, *, entities: dict[str, str], **kw: Any) -> None:
+        super().__init__(assets=[f"{n}Character" for n in entities], **kw)
+        self._entities = entities
+        self._order = list(entities)
+
+    def on_enter(self) -> None:
+        self.enters += 1
+        if self.enters <= self.miss_first:
+            return
+        for _ in range(self.chips_per_enter):
+            name = self._order[len(self.chips) % len(self._order)]
+            self.chips.append(
+                {
+                    "text": name,
+                    "entity_id": self._entities[name],
+                    "reference_type": "entity",
+                }
+            )
+
+
+async def test_character_mentions_land_as_entity_chips() -> None:
+    """The whole point: the chip must carry the ENTITY id, not merely exist."""
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakeEntityPage(entities={"Kael": "ent-kael", "Naia": "ent-naia"})
+    await MigratedComposer().attach_character_entities(
+        page, entity_ids=("ent-kael", "ent-naia"), names=("Kael", "Naia")
+    )
+    assert [c["entity_id"] for c in page.chips] == ["ent-kael", "ent-naia"]
+    assert {c["reference_type"] for c in page.chips} == {"entity"}
+
+
+async def test_a_media_chip_where_a_character_was_asked_for_is_refused() -> None:
+    """Flow's picker lists characters and media TOGETHER and does not rank them.
+
+    Measured 2026-09-07: the same ``@Kael`` query returned ``reference_type="entity"``
+    on one gesture and ``reference_type="media"`` — a JPEG that merely shared the name —
+    on another. Committing the file would generate a clip that looks right and drifts on
+    the next cut, which is the exact failure characters exist to prevent. So a chip that
+    is not an entity is refused before any submit.
+    """
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakeComposerPage(assets=["kael_ref.jpgImage"])  # commits MEDIA chips
+    with pytest.raises(ReferenceNotFoundError, match="media"):
+        await MigratedComposer().attach_character_entities(
+            page, entity_ids=("ent-kael",), names=("Kael",)
+        )
+
+
+async def test_the_wrong_entity_is_refused_even_though_a_chip_landed() -> None:
+    """A chip of the right KIND is not proof it is the right PERSON."""
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakeEntityPage(entities={"Kael": "ent-someone-else"})
+    with pytest.raises(ReferenceNotFoundError, match="ent-kael"):
+        await MigratedComposer().attach_character_entities(
+            page, entity_ids=("ent-kael",), names=("Kael",)
+        )
+
+
+def test_character_references_are_still_refused_until_a_submit_completes() -> None:
+    """The attach half is ported and proven; the submit half is not, so the gate stays.
+
+    `attach_character_entities` is verified live — the chip commits with the right
+    entity_id and Flow loads the character's voice — but the submit that follows produced
+    no reply in three runs. Until an entity-bound generation actually completes, refusing
+    instantly (exit 36) beats a 60-second timeout, so the gate must NOT be relaxed just
+    because the attach works. This test is the thing that stops that happening by
+    accident.
+    """
     from gflow_cli.api.transports.migrated_composer import _unported_form
 
-    bare = GenerateVideoRequest(prompt="hi", mode=Mode.T2V, reference_entities=("ent-1",))
-    assert _unported_form(bare) is not None
-
-    named = GenerateVideoRequest(
-        prompt="hi",
-        mode=Mode.T2V,
-        reference_entities=("ent-1",),
-        reference_entity_names=("Tun",),
+    assert _unported_form(_r2v(reference_entities=("ent-kael",))) is not None
+    assert (
+        _unported_form(_r2v(reference_entities=("ent-kael",), reference_entity_names=("Kael",)))
+        is not None
     )
-    assert _unported_form(named) is None
-
-
-async def test_a_character_mention_must_carry_the_id_that_was_asked_for() -> None:
-    """Searching is by display name, but the chip carries the entity id — so a name that
-    resolves to some other asset is caught. Recon hit exactly this: a query of "me"
-    matched an avatar named "Me"."""
-    from gflow_cli.api.transports.migrated_composer import MigratedComposer
-
-    page = FakeComposerPage()
-    page.chip_kind = ("likeness", "someone-else")
-    with pytest.raises(ReferenceNotFoundError) as exc_info:
-        await MigratedComposer().attach_entities(page, (("ent-1", "Tun"),))
-    message = str(exc_info.value)
-    assert "ent-1" in message and "Tun" in message
-
-
-async def test_a_matching_character_attaches() -> None:
-    from gflow_cli.api.transports.migrated_composer import MigratedComposer
-
-    page = FakeComposerPage()
-    page.chip_kind = ("entity", "ent-1")
-    ids = await MigratedComposer().attach_entities(page, (("ent-1", "Tun"),))
-    assert ids == ("ent-1",)

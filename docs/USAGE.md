@@ -186,6 +186,14 @@ Notes:
 Generate 1–4 images from one text prompt, or run a shell-friendly batch of 1–50
 prompts through one Flow session/project.
 
+> **Migrated `flow.google.com` accounts (#639):** T2I is supported with Nano Banana 2
+> (`nano2`) and Nano Banana Pro (`nano-pro`), the four aspects measured there (`16:9`,
+> `4:3`, `1:1`, `9:16`), and count 1–4. **`--project <id>` is required** — a fresh project
+> can only be created through the labs gallery, so without it the run exits 11. The
+> migrated page owns its reCAPTCHA + `ogiZ0b` submit. Imagen 4, Agent instructions,
+> character/entity references, `3:4` and `image batch` remain unavailable on that host and
+> fail before submit.
+
 ```text
 gflow image t2i PROMPT [PROMPT ...] [OPTIONS]
 gflow image t2i --prompts-file FILE [OPTIONS]
@@ -324,6 +332,12 @@ A 4-image run with `--out ./logos/` produces:
 ## `gflow image i2i`
 
 Generate 1–4 images by blending a text prompt with one or more reference images. Same flag set as `t2i`, plus a required `--ref` (repeatable).
+
+> **Migrated `flow.google.com` accounts (#639):** local-file `--ref` values are supported
+> and each uploaded media id is verified in the outgoing `ogiZ0b` body. **`--project <id>`
+> is required here** (exit 11 without it). UUID refs, `@Name` / `--reference-entity`, Agent
+> instructions, Imagen 4 and the `3:4` aspect remain unavailable on that host and fail
+> before submit rather than silently degrading to T2I.
 
 ```text
 gflow image i2i PROMPT --ref PATH_OR_UUID [--ref ...] [OPTIONS]
@@ -626,9 +640,11 @@ Options:
 > `--project <id>` runs on Flow's migrated `flow.google.com` host on every account; without
 > `--project` an unmoved account falls back to the labs driver, and a moved account exits 11
 > (`--project` is required there — project creation is not ported). `i2v` with a local
-> `--initial-frame` and no `--end-frame` runs there too (see [`gflow video i2v`](#gflow-video-i2v));
-> an end frame, a frame given by UUID or `@Name`, and everything else still exit 36 on a moved
-> account. `flow.google.com` forces the migrated composer,
+> `--initial-frame` and no `--end-frame` runs there too (see [`gflow video i2v`](#gflow-video-i2v)),
+> as does `r2v` from local `--ref` files (see [`gflow video r2v`](#gflow-video-r2v));
+> an end frame, a frame given by UUID or `@Name`, references given by `@Name` or
+> `--reference-entity`. `image t2i` and local-file `image i2i` also run on a moved
+> account; UUID/entity/instruction/Imagen-4 image forms still exit 36. `flow.google.com` forces the migrated composer,
 > `labs.google` switches it off — see [CONFIGURATION § GFLOW_CLI_FLOW_HOST](CONFIGURATION.md#gflow_cli_flow_host).
 
 ```bash
@@ -721,6 +737,23 @@ gflow video r2v "a knight in this armor walks forward" --ref armor.png
 gflow video r2v "blend these worlds" --ref a.png --ref b.png --ref c.png --model omni-flash
 ```
 
+> **On Flow's migrated `flow.google.com` host (#639)** — a moved account, or
+> `GFLOW_CLI_FLOW_HOST=flow.google.com` — only **local `--ref` files** are served, with
+> `--project <id>`. Each file is uploaded through the editor's own Upload entry (the same
+> path i2v uses, so it stays in the project's library like any upload) and then attached as
+> an `@` **mention** in the prompt — references are not a chip slot on this host. A run
+> whose references have not all attached is refused **before** submit (exit 32), and the
+> app's own submit body must carry every uploaded media id with a reference-to-video model
+> key (exit 7 otherwise) — the failure being a full-price clip with none of your references
+> on it. References given by `@Name` or `--reference-entity` (character entities) exit 36
+> there; an unmoved account keeps the labs driver for those.
+>
+> **`--duration` is refused on this path (exit 11).** The host offers reference-to-video
+> only at its base 8s tier. At 4s or 6s it does not refuse — it drops the references,
+> types their file *names* into the prompt and bills a text-to-video clip (measured at
+> zero credits, 2026-09-06). Because the editor remembers the last duration used, an r2v
+> run pins 8s itself rather than inheriting it. Pass no `--duration`, or `--duration 8`.
+
 ### Adding your Avatar to an r2v generation
 
 `--avatar` attaches your Flow Avatar (likeness) **alongside** the reference
@@ -776,17 +809,17 @@ developed against. gflow makes no claim that your account can use it.
 What gflow does about it:
 
 1. **Pre-flight.** Before generating, gflow calls the free eligibility endpoint.
-   A definitive "not eligible" aborts with **exit 37**
+   A definitive "not eligible" aborts with **exit 39**
    (`AvatarUnavailableError`) — no reCAPTCHA token minted, no credits spent.
 2. **Media-dialog gate.** If the pre-flight answer is inconclusive (a network
    blip, an unrecognised response shape), gflow opens Flow's Add Media dialog
    and looks for the Avatar tab. Other tabs present but no Avatar tab is also
-   exit 37, still **before** the prompt is submitted.
+   exit 39, still **before** the prompt is submitted.
 3. **No silent degradation.** gflow never falls back to a plain t2i/t2v
    generation without the likeness. If the Avatar cannot be attached, nothing is
    submitted.
 
-If you hit exit 37, confirm the Avatar tab works in Flow's own web UI at
+If you hit exit 39, confirm the Avatar tab works in Flow's own web UI at
 <https://labs.google/fx/tools/flow> first. If it does not, use
 [`gflow character`](#gflow-character) for a reusable subject or `--ref` for a
 one-off reference image instead; re-running will not change a region verdict.
@@ -1206,6 +1239,14 @@ There is **no aspect-ratio control** for characters. Generated images are
 **downloaded** to local (or cloud) storage; the signed `fifeUrl` is used only at
 download time and never persisted. The result reports the entity id, the bound
 workflow ids, and each saved slot's local path (face, body).
+
+**Running it twice with the same `--name` creates two characters, not one.** The
+command is not idempotent on name: each successful run mints a fresh entity and spends
+face (and body) image quota again. Check with `gflow character list` before re-running,
+and remove a duplicate with `gflow character rm`. What *is* guaranteed is **resume after
+an interrupted run**: if a create is killed mid-saga, the next run with the same name
+picks up the recorded entity instead of minting a second one, so a crash costs no extra
+quota.
 
 ### `gflow character list`
 
@@ -1820,7 +1861,7 @@ shell scripts can branch on the failure mode without parsing stderr.
 | `0`  | —                     | Success                                          | —                                                          |
 | `1`  | unhandled exception   | Anything not derived from `GFlowError` — **or a deliberate CLI verdict**: `gflow auth status` exits 1 for a dead/unverifiable session | Re-run with `--verbose`; for `auth status` follow the printed hint; file a bug if it persists |
 | `2`  | usage error (Click)   | Bad usage / missing arg / profile missing        | Standard CLI usage error                                   |
-| `3`  | `AuthExpiredError`    | Session cookies rejected by Flow (401/403)       | `gflow auth login --profile <name>`                        |
+| `3`  | `AuthExpiredError`    | Session cookies rejected by Flow (401/403), or Flow served one of its OAuth/sign-in routes instead of the page gflow asked for ([#756](https://github.com/ffroliva/gflow-cli/issues/756)) | `gflow auth login --profile <name>`                        |
 | `4`  | `RateLimitError`      | Quota / rate limit hit, exhausted retries        | Wait + reduce `GFLOW_CLI_CONCURRENCY`                      |
 | `5`  | `ContentPolicyError`  | Flow rejected the prompt (200 + empty `media[]`) | Soften prompt wording                                      |
 | `6`  | `NetworkError`        | Network failure persisted across 3 attempts      | Check connectivity                                         |
@@ -1831,7 +1872,7 @@ shell scripts can branch on the failure mode without parsing stderr.
 | `11` | `ConfigurationError`  | Local configuration or browser mode is invalid — on the migrated `flow.google.com` host also a request the host cannot take as given (no `--project`, a model its menu does not offer, a `--duration` its settings pane renders no control for); includes `ProfileLockedError` (same-profile lease contention: another `gflow`/daemon/MCP call already owns this profile) and `ProfileEngineDowngradeError` (the profile was last written by a newer Chromium major than the bundled engine about to open it — see [AUTHENTICATION § Chromium downgrade guard](AUTHENTICATION.md#chromium-downgrade-guard)) | Fix the option/env var shown in the error; for lease contention wait, use a different `--profile`, or set `GFLOW_CLI_LEASE_WAIT_SECONDS=N` to wait bounded; upgrade gflow-cli/Playwright or re-run `gflow auth login` for a downgrade refusal |
 | `12` | `AuthLoginTimeoutError` | Browser sign-in was not completed in time       | Re-run login or raise `GFLOW_CLI_AUTH_LOGIN_TIMEOUT`       |
 | `13` | `SecurityError`       | Unsafe local profile or secret handling blocked   | Follow the error's safety guidance                         |
-| `14` | `AuthBrowserRejectedError` | Google rejected the login browser             | `gflow auth login --browser chrome`                        |
+| `14` | `AuthBrowserRejectedError` | Sign-in rejected the browser for `navigator.webdriver` | Re-run `gflow auth login`; with Chrome installed the `chrome` strategy retries automatically |
 | `15` | `BrowserSessionClosedError` | The automation browser window was closed mid-operation | Re-run; keep the browser window open until the command finishes |
 | `16` | `DataStoreError`      | Local database cannot be opened, a migration failed, or the DB schema is newer than the installed gflow-cli | See below                                  |
 | `17` | `ModelModeIncompatibilityError` | The chosen video model can't do the requested mode — today that is `omni-flash` for `chain` (issues #125, #626) | Use a Veo 3.1 model (`veo-lite` / `veo-fast` / `veo-quality` / `veo-lite-lp`) for `chain`. Single-clip `i2v` with omni-flash, `--end-frame` included, is accepted |
@@ -1840,7 +1881,7 @@ shell scripts can branch on the failure mode without parsing stderr.
 | `20` | `FrameExtractionError` | Could not extract the last frame for a video chain link | Check the source video downloaded intact; retry the link  |
 | `21` | `ChainPartialError`   | A video chain stopped mid-way; earlier links completed | Resume from the last completed link shown in the error     |
 | `22` | `UpscaleUnavailableError` | 4K upscale is gated to Flow **Ultra** accounts (HTTP 403) | Use `--scale 2k`, or upgrade the Flow plan                |
-| `23` | `UiSelectorDriftError` | A Flow editor control could not be located — Google changed the frontend (issues #183, #493) — **or** a blocking announcement overlay survived dismissal, so no control below it can be clicked (probe `overlay_close_button`, #593) | Update gflow-cli; file a bug with the probe name + the diagnostics JSON / debug screenshot referenced in the error message, plus the incident bundle's `report.md` when one was written. For `overlay_close_button`: open the project once in Chrome and dismiss the announcement — the dismissal persists on your account |
+| `23` | `UiSelectorDriftError` | A Flow editor control could not be located — Google changed the frontend (issues #183, #493) — **or** a blocking announcement overlay survived dismissal, so no control below it can be clicked (probe `overlay_close_button`, #593). On the migrated host a missing submit control is checked against the wallet first and reported as **37** when Flow swapped in its insufficient-credits warning, so a short balance no longer arrives here | Update gflow-cli; file a bug with the probe name + the diagnostics JSON / debug screenshot referenced in the error message, plus the incident bundle's `report.md` when one was written. For `overlay_close_button`: open the project once in Chrome and dismiss the announcement — the dismissal persists on your account |
 | `24` | `BrowserEngineUnavailableError` | `GFLOW_CLI_BROWSER_ENGINE=patchright` but the engine is not installed | `pip install 'gflow-cli[patchright]'`, or unset `GFLOW_CLI_BROWSER_ENGINE` |
 | `25` | `FlowAgentUiError`    | The profile is on Flow's Agentic UI cohort and the classic media panel is unrecoverable for this operation | Rare since v0.38.0 (#332): the mode controller reliably recovers agentic→classic, so first retry with `--ui-mode classic`; if it persists, see KNOWN_ISSUES on the agentic cohort |
 | `26` | `MediaAttributionError` | Generated media could not be reliably attributed to this request (issue #281) | Re-run; a dedicated project with fewer pre-existing assets avoids the ambiguity |
@@ -1848,13 +1889,15 @@ shell scripts can branch on the failure mode without parsing stderr.
 | `28` | `UiModeUnavailableError` | The Flow UI arm this command required (`--ui-mode`/`GFLOW_CLI_UI_MODE`; `-i` forces agentic for images; **video always requires classic** — no agentic video driver exists) couldn't be reached after a switch attempt; aborted before submitting — no credits spent (issue #299) | Retry (the cohort flaps per load); try another `--profile`; for images you can also relax `GFLOW_CLI_UI_MODE` — for video there is nothing to relax |
 | `29` | `MentionIndexUnavailableError` | An `@mention` was present but the catalog source needed to resolve it (character entities or media assets) failed to load — distinct from an empty index, which is not an error | Check network connectivity (character source) or `GFLOW_CLI_DB_PATH` / filesystem permissions (media source), then retry |
 | `30` | `QueueSchemaError`    | A `gflow serve`/MCP worker-queue task payload has an unrecognized `schema_version` or fails validation against the typed request DTOs | Usually means gflow-cli was downgraded after a newer version enqueued the task, or the payload was hand-edited; re-enqueue with a compatible version |
-| `31` | `FlowAppError`        | Flow's web app hit a client-side exception (its error-boundary page rendered instead of the editor) — a transient Flow crash, not a gflow bug | Retry shortly; if it persists, Flow itself is degraded — wait and retry later |
+| `31` | `FlowAppError`        | Flow did not serve the page gflow asked for. Two shapes: its error-boundary page rendered instead of the editor (a transient client-side crash), or it redirected to `flow.google.com/about` instead of the project ([#756](https://github.com/ffroliva/gflow-cli/issues/756)) | Crash: retry shortly; if it persists, Flow itself is degraded. `/about`: open the project in a browser on that host and confirm this account can reach it — whether a retry helps is [not measured](superpowers/spikes/2026-09-10-about-redirect-stability.md), so gflow does not flag it retryable |
 | `32` | `ReferenceNotFoundError` | A referenced media NAME is not in this project's picker. Flow indexes a short auto-caption, not the generation prompt, so a prompt used as a reference name never matches | Reference the asset by its media UUID, pass a local file with `--ref`, or check what exists with `gflow data list images` |
 | `33` | — (`gflow doctor` verdict) | Doctor found warn/fail findings — a successful diagnosis, not an error class | Review the report; see [`gflow doctor`](#gflow-doctor) |
 | `34` | `SyncPartialError`    | `gflow data sync` failed on some projects but succeeded on others — completed writes stay committed | Retryable: re-run the same command; it resumes with what is still nameless (see [`gflow data sync`](#gflow-data-sync)) |
 | `35` | `ExtendUnavailableError` | No Veo extend model is orderable for this account and aspect — the extend family is tier-gated and there is no square variant. **Never auto-retry**: a tier gate does not clear on its own. |
-| `36` | `FlowHostMigratedError` | Flow served the project from `flow.google.com` (the origin Google is migrating accounts onto) and the request could not be routed to the migrated composer: `GFLOW_CLI_FLOW_HOST=labs.google` switched it off, or the request type is not ported to that host yet (today `video t2v`, and `video i2v` from a local `--initial-frame` with no end frame, both with `--project`). Not selector drift (23) | **Not retryable.** The handoff is a per-account setting applied on every load. Use `gflow video t2v --project <id>` or `gflow video i2v --initial-frame <file> --project <id>` on that host, or the REST surface (`gflow project list`, `gflow data …`); follow #639 for the rest of the matrix |
-| `37` | `AvatarUnavailableError` | Flow's Avatar/likeness is not usable on this account — identity-verification / region gate. Raised BEFORE any submit, so nothing was spent | NOT retryable: a region verdict is the same on a re-run. Confirm the Avatar tab works in Flow's web UI; otherwise use [`gflow character`](#gflow-character) or `--ref` (see [§ Avatar availability](#avatar-availability-region-and-account-eligibility)) |
+| `36` | `FlowHostMigratedError` | Flow served the project from `flow.google.com` and the request could not be represented by the migrated composer, or `GFLOW_CLI_FLOW_HOST=labs.google` disabled it. Supported today: `video t2v`; local-file video i2v/r2v; `image t2i`; and local-file `image i2i`. Image UUID/entity/instruction/Imagen-4 forms, `image batch`, and the `3:4` image aspect remain unsupported. Not selector drift (23) | **Not retryable.** Use one of the supported forms — `--project` is required for images as well as video — or the REST surface (`gflow project list`, `gflow data …`); follow #639 for the remaining matrix |
+| `37` | `InsufficientCreditsError` | The account's balance is short **for the model it asked for**, so Flow **replaced** the submit control with its `Insufficient credits warning` instead of disabling it. Short, not necessarily empty: measured 2026-09-07, an account holding **50** credits requesting `--model veo-quality` (**100**) rendered the warning. Explicitly **not** selector drift (23): reporting it as drift told users to file a frontend bug over a credit shortfall | Check the balance with `gflow credits user`, then pick a cheaper `--model` (`veo-lite` costs 10), top up, or wait for the allowance to reset. Nothing was submitted, so no credit was spent. `gflow image` draws on a separate daily quota and may still work |
+| `38` | `FlowAccountChooserError` | The post-migration hop landed on Google's account chooser and the profile's recorded account (`.gflow_account`) could not be selected automatically (row absent, click-through did not return to the editor, or `--account` mismatch) | **Not retryable**: run `gflow auth login --profile <name>` and complete the chooser manually, while signed in as the recorded account (re-run `gflow auth login` if the chooser offers a different session) |
+| `39` | `AvatarUnavailableError` | Flow's Avatar/likeness is not usable on this account — identity-verification / region gate. Raised BEFORE any submit, so nothing was spent | NOT retryable: a region verdict is the same on a re-run. Confirm the Avatar tab works in Flow's web UI; otherwise use [`gflow character`](#gflow-character) or `--ref` (see [§ Avatar availability](#avatar-availability-region-and-account-eligibility)) |
 | `130`| SIGINT                | User-interrupted (Ctrl-C)                        | —                                                          |
 
 **Exit code 16 — data store / migration error.** Fires when:
@@ -1893,7 +1936,7 @@ if [ "$rc" -ne 0 ]; then
     10)  echo "Flow rejected the request — adjust the prompt/request and retry"; exit 1 ;;
     11)  echo "Configuration error — fix the option or env var shown above"; exit 1 ;;
     13)  echo "Security guard blocked unsafe local state — follow the error guidance"; exit 1 ;;
-    14)  echo "Google rejected the login browser — run: gflow auth login --browser chrome"; exit 1 ;;
+    14)  echo "Sign-in rejected the browser (navigator.webdriver) — run: gflow auth login"; exit 1 ;;
     16)  echo "Database error — check permissions or upgrade gflow-cli"; exit 1 ;;
     130) echo "Cancelled with Ctrl-C"; exit 130 ;;
     *)   echo "Unknown failure (exit $rc)"; exit 1 ;;
