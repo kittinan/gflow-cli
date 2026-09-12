@@ -398,30 +398,43 @@ def test_a_named_character_reference_is_served_now_that_a_submit_completes() -> 
     )
 
 
-def test_an_avatar_request_is_refused_because_this_host_has_no_likeness_surface() -> None:
-    """`--avatar` used to pass every gate and bill a clip with no presenter on it.
+def test_the_avatar_alone_is_served_but_never_alongside_references() -> None:
+    """The Avatar IS on this host; what it cannot do is share a submit.
 
-    `_unported_form` never inspected `use_avatar`, and nothing in `migrated_composer`
-    attaches a likeness — `attach_start_frame` is i2v, `attach_references` is r2v,
-    `attach_character_entities` is entities. The client's free `likeness:checkEligibility`
-    pre-flight does not catch it either: it answers about the ACCOUNT, and a live account
-    answered `determined=True eligible=True` while this host still offered nothing to bind
-    to. That is the #716 silent-drop shape, one surface over.
+    A first pass concluded there was no likeness surface at all. That was wrong twice
+    over: it clicked the PROJECT toolbar `add` (Upload / New collection / Create character
+    / New scene) rather than the prompt box's own, and it looked for a `face` ligature
+    while the popover was shut. Opened properly, the popover's side nav carries an Avatars
+    tab and `attach_avatar` drives it — verified live, `gflow video avatar` exit 0.
 
-    Measured on the live editor 2026-09-12: zero `person` / `face` / `account_circle` /
-    `portrait` / `mood` ligatures anywhere on it, and the toolbar Add menu offers exactly
-    Upload, New collection, Create character and New scene — no Avatar entry. The
-    substitute this host DOES offer is a character entity, which is served.
+    The real limit is combination. Measured at $0 by blocking the page's own fetch/XHR and
+    reading the body it tried to send: with a likeness attached Flow submits
+    `veo_3_1_r2v_lite_low_priority` carrying three likeness ids and the project, and
+    nothing for the uploaded reference — identical in shape whether or not a reference chip
+    sits on the prompt. A billed run had already shown it as exit 7, "missing 1 of 1
+    uploaded reference". So the clip would carry the presenter and none of the product.
     """
     from gflow_cli.api.transports.migrated_composer import _unported_form
 
-    assert _unported_form(_r2v(reference_images=(Path("a.png"),), use_avatar=True)) == (
-        "the Avatar (likeness)"
-    )
-    # Mode-independent, and ahead of the generic mode refusal: a Mode.AVATAR request is
-    # named for the thing it actually wants, not as "the avatar mode".
+    # Prompt + likeness only: served.
     avatar_only = GenerateVideoRequest(prompt="walking", mode=Mode.AVATAR, aspect=Aspect.PORTRAIT)
-    assert _unported_form(avatar_only) == "the Avatar (likeness)"
+    assert _unported_form(avatar_only) is None
+
+    # With a local reference, or a character, the reference is the thing Flow drops.
+    assert _unported_form(_r2v(reference_images=(Path("a.png"),), use_avatar=True)) == (
+        "the Avatar together with references"
+    )
+    assert (
+        _unported_form(
+            _r2v(
+                reference_images=(Path("a.png"),),
+                reference_entities=("ent-kael",),
+                reference_entity_names=("Kael",),
+                use_avatar=True,
+            )
+        )
+        == "the Avatar together with references"
+    )
 
 
 def test_a_character_run_is_moved_onto_the_migrated_host_like_any_other() -> None:

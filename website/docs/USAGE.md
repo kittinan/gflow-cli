@@ -770,14 +770,25 @@ gflow video r2v "blend these worlds" --ref a.png --ref b.png --ref c.png --model
 
 ### Adding your Avatar to an r2v generation
 
-> **Not available on the migrated `flow.google.com` host (exit 36).** That editor
-> renders no likeness surface at all: measured 2026-09-12, zero `person` / `face` /
-> `account_circle` / `portrait` ligatures anywhere on it, and its toolbar Add menu offers
-> only Upload, New collection, Create character and New scene. `--avatar` is therefore
-> refused *before* submit — it used to pass every gate, including the free account-level
-> eligibility pre-flight, and bill a full-price clip with the presenter silently missing.
-> The substitute on that host is a **character entity**: `gflow character create`, then
-> `--reference-entity <id> --reference-entity-name <name>`.
+> **On the migrated `flow.google.com` host the Avatar works ALONE, never alongside
+> references (exit 36).** `gflow video avatar` is served there — the prompt box's own
+> **+** button opens a popover whose side nav carries an Avatars tab, and gflow attaches
+> your likeness from it. But combining it with `--ref` or `--reference-entity` is refused
+> before submit, because Flow silently drops the reference: measured at zero cost
+> 2026-09-12, a likeness-bearing submit carries three likeness ids and the project and
+> **nothing** for the uploaded reference — identical whether or not a reference chip is on
+> the prompt. The clip would show the presenter and none of the product.
+>
+> So on that host, pick one:
+>
+> - **presenter only** → `gflow video avatar "<prompt>" --project <id>`
+> - **presenter + product** → a character instead of the Avatar: `gflow character create`,
+>   then `gflow video r2v ... --reference-entity <id> --reference-entity-name <name>
+>   --ref product.png`, which does carry both.
+>
+> If your account has never recorded an avatar, the Avatars tab shows its onboarding
+> introduction instead of one, and gflow fails with exit 39 telling you so — Flow's free
+> eligibility check reports whether you *may* use an avatar, not whether you *have* one.
 
 `--avatar` attaches your Flow Avatar (likeness) **alongside** the reference
 images, in one generation — Flow carries `referenceLikenesses` and

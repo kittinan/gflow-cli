@@ -9,21 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`--avatar` on the migrated host billed a clip with no presenter on it.**
-  `_unported_form` never inspected `use_avatar`, and nothing in `migrated_composer`
-  attaches a likeness — `attach_start_frame` is i2v-only, `attach_references` r2v-only,
-  `attach_character_entities` entities-only. The client's free `likeness:checkEligibility`
-  pre-flight does not cover it: it answers about the ACCOUNT, and a live account answered
-  `determined=True eligible=True` while this host offered nothing to bind to. So the
-  request passed every gate and submitted at full price without the Avatar — the #716
-  silent-drop shape, one surface over. It is now refused before submit (exit 36).
+- **`--avatar` on the migrated host billed a clip with no presenter on it — and the
+  first fix for it was wrong.** `_unported_form` never inspected `use_avatar`, and nothing
+  in `migrated_composer` attached a likeness, so the request passed every gate (including
+  the free `likeness:checkEligibility` pre-flight, which answers about the ACCOUNT — a live
+  account answered `eligible=True` throughout) and submitted at full price with the
+  presenter missing: the #716 silent-drop shape, one surface over.
 
-  The refusal is measured, not assumed: on the live editor 2026-09-12 there are zero
-  `person` / `face` / `account_circle` / `portrait` / `mood` ligatures anywhere on the
-  surface, and the toolbar Add menu offers exactly Upload, New collection, Create
-  character and New scene. No Avatar entry exists to drive. The substitute this host does
-  offer is a character entity, which is served — `gflow character create`, then
-  `--reference-entity` with `--reference-entity-name`.
+  It was first fixed by refusing `--avatar` outright, on a spike that found no likeness
+  surface. That spike was wrong twice: it clicked the PROJECT toolbar `add` — whose menu is
+  Upload / New collection / Create character / New scene — rather than the prompt box's own
+  `add`, which the driver's own selector already excludes as a separate button; and it
+  searched for a `face` ligature while that popover was closed. Opened properly, the
+  popover's side nav carries an **Avatars** tab. `attach_avatar` now drives it: prompt-box
+  `add` -> the tab anchored on its `face` glyph -> the avatar -> proof that a
+  `flow-likeness-ingredient-chip` appeared. That chip, not a mention, is the evidence —
+  attaching a likeness leaves `read_chips` untouched, because the likeness is a separate
+  wire slot exactly as `referenceLikenesses` is on labs.
+
+  `gflow video avatar` is therefore served on the migrated host (live 2026-09-12, exit 0),
+  and `Mode.AVATAR` is no longer refused as "the avatar mode".
+
+  What IS refused is the combination. Measured at $0 by patching the page's own `fetch`
+  and `XMLHttpRequest` and reading the body it tried to send: a likeness-bearing submit
+  goes out as `veo_3_1_r2v_lite_low_priority` carrying three likeness ids plus the project
+  and **nothing** for the uploaded reference — identical in shape whether or not a
+  reference chip sits on the prompt. A billed run had already shown it as exit 7, "missing
+  1 of 1 uploaded reference". So `--avatar` with `--ref` or `--reference-entity` is now
+  exit 36 naming that combination, and the remedy is a character entity, which carries
+  both.
 
 - **r2v refused `--duration 10`, a length Flow actually offers.** The rule was "r2v must
   be `R2V_DURATION_S` (8)", generalised from a real measurement that 4s and 6s drop the

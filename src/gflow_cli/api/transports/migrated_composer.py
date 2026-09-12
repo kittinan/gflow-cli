@@ -61,6 +61,7 @@ from gflow_cli.api.video import (
     VideoStatus,
 )
 from gflow_cli.errors import (
+    AvatarUnavailableError,
     ConfigurationError,
     FlowHostMigratedError,
     InsufficientCreditsError,
@@ -176,6 +177,39 @@ UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 #: The toolbar `+` — the only add affordance OUTSIDE the prompt box (the box has its
 #: own `add` icons). XPath because CSS cannot express "no such ancestor".
 TOOLBAR_ADD = "xpath=//button[.//mat-icon[normalize-space()='add']][not(ancestor::flow-prompt-box)]"
+#: The PER-GENERATION attach, inside the prompt box — the sibling :data:`TOOLBAR_ADD`
+#: excludes. The project toolbar's menu offers Upload / New collection / Create character
+#: / New scene; this one opens the asset popover whose side nav carries the Avatars tab.
+#: Mixing them up is what made a first pass conclude this host has no likeness surface.
+PROMPT_BOX_ADD = "xpath=//flow-prompt-box//button[.//mat-icon[normalize-space()='add']]"
+#: Tier-1: the tab is found by its `face` ligature, never by the translated label
+#: ("Avatars" in en). Its siblings are dashboard/image/videocam/voice_selection/
+#: accessibility_new/drive_folder_upload, so the glyph alone is unambiguous.
+AVATAR_TAB = "[role='tab']:has(mat-icon:text-is('face'))"
+#: Rendered by the Avatars tab when the account has NOT created an avatar yet: an
+#: onboarding pitch plus a "Get started" button. Structural, so it survives translation.
+#: This is a DIFFERENT state from "ineligible" — `likeness:checkEligibility` answers about
+#: permission, and an account can answer `eligible=True` while owning no avatar at all.
+LIKENESS_INTRO = "flow-likeness-intro-view"
+#: The popover the prompt-box add opens. Material renders it in `.cdk-overlay-container`,
+#: NOT as `[role='dialog']`, which is why a dialog-scoped dump of it reads as empty.
+ADD_MENU_POPOVER = "flow-add-menu-popover-content"
+#: One selectable asset inside the popover's list — the Avatars tab uses the same component
+#: as every other tab, NOT the `flow-grid-tile-container` the project gallery uses.
+ADD_MENU_ASSET_ITEM = "flow-add-menu-asset-item"
+#: The element the prompt box grows when a likeness is attached. This — NOT a mention
+#: chip — is the proof the avatar landed: measured 2026-09-12, attaching it left
+#: `read_chips` unchanged (the likeness is a separate wire slot, as `referenceLikenesses`
+#: is on labs) while `flow-likeness-ingredient-chip` went 0 -> 1, carrying a base64
+#: portrait and `aria-disabled="false" aria-busy="false"`.
+LIKENESS_CHIP = "flow-prompt-box flow-likeness-ingredient-chip"
+#: The popover's right-hand detail pane holds exactly one action button for the selected
+#: asset ("Add to prompt" in en). Anchored on the pane, never on the translated label.
+ADD_MENU_DETAIL_ACTION = "flow-add-menu-detail-pane button"
+#: How long the Avatars tab is given to populate before its emptiness is believed. The
+#: intro view renders while the list is still loading, so reading it immediately after the
+#: tab click reports "no avatar" for an account that owns one — measured 2026-09-12.
+AVATAR_LIST_BUDGET_S = 6.0
 UPLOAD_MENU_ITEM = f"{OVERLAY} {MENU_ITEM}:has(mat-icon:text-is('upload'))"
 EMPTY_CHIP = "flow-prompt-box button.empty-chip"
 BOUND_CHIP = "flow-prompt-box button.chip-container:has(img)"
@@ -401,18 +435,24 @@ def _unported_form(request: GenerateVideoRequest) -> str | None:
     if request.reference_entities:
         if len(request.reference_entity_names) != len(request.reference_entities):
             return "character references without a matching --reference-entity-name"
-    # The Avatar/likeness has NO attach on this host — nothing in this module drives it.
-    # Like the entity check above this is MODE-INDEPENDENT and must stay ahead of every
-    # early return: `use_avatar` is legal on R2V and on Mode.AVATAR, and neither
-    # `attach_start_frame` (i2v), `attach_references` (r2v) nor
-    # `attach_character_entities` looks at it. Without this line the request passes every
-    # gate — including the client's free `likeness:checkEligibility` pre-flight, which
-    # answers about the ACCOUNT, not about this host — and submits a full-price clip with
-    # the presenter silently missing. That is the #716 failure exactly, and the refusal is
-    # free while the clip is not.
-    if request.attaches_likeness:
-        return "the Avatar (likeness)"
+    # The Avatar IS served on this host — behind the prompt box's own `add`, the side-nav
+    # tab with the `face` ligature — and `attach_avatar` drives it. What it cannot do is
+    # share a submit with anything else.
+    #
+    # Measured at $0 on 2026-09-12 by blocking the page's own fetch/XHR and reading the
+    # body it tried to send: with a likeness attached, Flow submits
+    # `veo_3_1_r2v_lite_low_priority` carrying three likeness ids, the project, and
+    # NOTHING for the uploaded reference — byte-identical in shape whether or not a
+    # reference chip is on the prompt. A billed run had already proved it the expensive
+    # way (exit 7, "missing 1 of 1 uploaded reference"). The reference is not merely
+    # unordered in the body; it is absent, so the clip would carry the presenter and none
+    # of the product. Refusing is free.
+    if request.attaches_likeness and (request.reference_images or request.reference_entities):
+        return "the Avatar together with references"
     if request.mode is Mode.T2V:
+        return None
+    if request.mode is Mode.AVATAR:
+        # Prompt + likeness only, which is exactly the submit this host builds.
         return None
     if request.mode is Mode.R2V:
         # Local files only, for the same reason i2v is: the picker lists assets by
@@ -925,7 +965,7 @@ class MigratedComposer:
                 # Frames renders the Start/End chips the attach stage binds to. Flow
                 # remembers the last submode per account, so it is set, not assumed.
                 await self._select(page, pane, axis="submode", lig=FRAMES_LIGATURE)
-            if request.mode is Mode.R2V or request.reference_entities:
+            if request.mode is Mode.R2V or request.reference_entities or request.attaches_likeness:
                 # Ingredients is where references live, and the app derives the r2v model
                 # key from this plus the picker choice — the same run sends
                 # veo_3_1_r2v_lite_low_priority here and veo_3_1_lite_low_priority under
@@ -1594,6 +1634,113 @@ class MigratedComposer:
             )
         log.info("migrated.character_entities_attached", count=len(entity_ids), names=list(names))
 
+    async def attach_avatar(self, page: Page) -> None:
+        """Attach the account's Flow Avatar (likeness) through the prompt-box asset popover.
+
+        Sequence: the prompt box's own ``add`` -> the side-nav tab carrying the ``face``
+        ligature -> the first avatar tile -> confirm a chip landed. gflow never writes
+        ``referenceLikenesses`` itself; selecting the tile is what makes Flow's own JS put
+        the likeness on the outgoing request, exactly as the labs path works.
+
+        Two refusals, and neither continues toward a submit:
+
+        * The tab renders :data:`LIKENESS_INTRO` -> :class:`AvatarUnavailableError`. The
+          account may use an avatar but has not CREATED one, so there is nothing to
+          attach. This is invisible to the client's ``likeness:checkEligibility``
+          pre-flight, which answers about permission: a live account answered
+          ``eligible=True`` while this tab showed the "Get started" pitch. Only a human
+          can clear it — the flow records their face and voice.
+        * The tab is absent entirely -> :class:`UiSelectorDriftError`. Its six siblings
+          render from the same side nav, so a missing ``face`` glyph is the popover having
+          changed, not a capability verdict.
+
+        Escape is pressed on every exit path: a Page must never go back to the pool with
+        the popover open.
+        """
+        add = page.locator(PROMPT_BOX_ADD).first
+        if not await add.count():
+            raise UiSelectorDriftError(
+                detail=(
+                    "migrated host: the prompt box's own 'add' button was not found, so the "
+                    "asset popover carrying the Avatars tab could not be opened "
+                    "(host=migrated)"
+                ),
+            )
+        before = await page.locator(LIKENESS_CHIP).count()
+        await add.click(timeout=5000)
+        await page.wait_for_timeout(1500)
+        try:
+            tab = page.locator(AVATAR_TAB).first
+            if not await tab.count():
+                tabs = await page.locator("[role='tab']").count()
+                raise UiSelectorDriftError(
+                    detail=(
+                        f"migrated host: the asset popover rendered {tabs} tab(s) but none "
+                        f"carried the 'face' ligature the Avatars tab is anchored on "
+                        f"(host=migrated)"
+                    ),
+                )
+            await tab.click(timeout=5000)
+            items = page.locator(f"{ADD_MENU_POPOVER} {ADD_MENU_ASSET_ITEM}")
+            deadline = time.monotonic() + AVATAR_LIST_BUDGET_S
+            while not await items.count():
+                if time.monotonic() >= deadline:
+                    break
+                await page.wait_for_timeout(300)
+            if not await items.count():
+                # The list never populated. The intro view says why, and says it is not a
+                # gflow fault: the account owns no avatar. Without it, the popover changed.
+                if await page.locator(LIKENESS_INTRO).count():
+                    raise AvatarUnavailableError(
+                        "this Google account has no Flow Avatar yet: the Avatars tab is "
+                        "showing its 'Get started' introduction rather than an avatar to "
+                        "attach. Eligibility is not the same as having one — Flow reports "
+                        "this account MAY use an avatar, but the one-time face-and-voice "
+                        "recording has not been done. Aborted before submitting — no "
+                        "credits were spent.",
+                        remediation_hint=(
+                            "Open your project on flow.google.com, click the + button inside "
+                            "the prompt box, choose the Avatars tab and press 'Get started' "
+                            "to record your avatar once. Re-run this command afterwards. For "
+                            "a reusable presenter without the avatar flow, create a character "
+                            "instead (`gflow character create`) and pass --reference-entity "
+                            "with --reference-entity-name."
+                        ),
+                    )
+                raise UiSelectorDriftError(
+                    detail=(
+                        f"migrated host: the Avatars tab listed no "
+                        f"{ADD_MENU_ASSET_ITEM} within {AVATAR_LIST_BUDGET_S:.0f}s and showed "
+                        f"no {LIKENESS_INTRO} either, so neither an avatar nor a reason for "
+                        f"its absence could be read (host=migrated)"
+                    ),
+                )
+            await items.first.click(timeout=5000)
+            await page.wait_for_timeout(1200)
+            # Measured 2026-09-12: clicking the avatar both attaches it and DISMISSES the
+            # popover, so the detail pane's "Add to prompt" button is already gone by here.
+            # Requiring it turned a working attach into selector drift. It is clicked only
+            # if the popover is still standing, so a build that needs the confirm step keeps
+            # working without asserting either shape is the real one.
+            if await page.locator(ADD_MENU_POPOVER).count():
+                action = page.locator(f"{ADD_MENU_POPOVER} {ADD_MENU_DETAIL_ACTION}").first
+                if await action.count():
+                    await action.click(timeout=5000)
+                    await page.wait_for_timeout(1200)
+        finally:
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(400)
+        attached = await page.locator(LIKENESS_CHIP).count()
+        if attached <= before:
+            raise ReferenceNotFoundError(
+                detail=(
+                    f"migrated host: adding the avatar left the prompt box with {attached} "
+                    f"likeness chip(s), the same as before — refusing to spend credits on a "
+                    f"generation that would carry no likeness"
+                ),
+            )
+        log.info("migrated.avatar_attached", likeness_chips=attached)
+
     async def clear_composer(self, page: Page) -> None:
         await page.locator(COMPOSER).first.click(timeout=5000)
         await page.keyboard.press("Control+a")
@@ -2252,18 +2399,29 @@ async def run_video(
             names=tuple(request.reference_entity_names),
             clear=not reference_ids,
         )
+    if request.attaches_likeness:
+        # Last, like the labs path orders it: the likeness goes on AFTER any frames,
+        # references and characters, because those attaches steal keyboard focus and the
+        # popover must not be open while they run.
+        await composer.attach_avatar(page)
     # The prompt is appended whenever mentions are already in the document: clicking the
-    # composer would move the caret away from where the last one left it.
+    # composer would move the caret away from where the last one left it. The avatar puts a
+    # chip there too, so it counts exactly like a reference or a character does.
     has_mentions = bool(request.reference_entities) or request.mode is Mode.R2V
     await composer.send_prompt(page, request.prompt, append=has_mentions)
     if request.mode is Mode.R2V:
         attached = await composer.read_chips(page)
-        if len(attached) != len(request.reference_images) + len(request.reference_entities):
+        # The likeness is deliberately absent from this sum: it is not a mention, it is a
+        # separate `flow-likeness-ingredient-chip`, and `attach_avatar` verifies it itself.
+        expected = len(request.reference_images) + len(request.reference_entities)
+        if len(attached) != expected:
             raise ReferenceNotFoundError(
                 detail=(
-                    f"migrated host: {len(request.reference_images)} reference(s) requested "
-                    f"but {len(attached)} on the prompt at submit time — refusing to spend "
-                    f"credits on a run that would ignore them"
+                    f"migrated host: {expected} mention(s) requested "
+                    f"({len(request.reference_images)} reference, "
+                    f"{len(request.reference_entities)} character) but {len(attached)} on the "
+                    f"prompt at submit time — refusing to spend credits on a run that would "
+                    f"ignore them"
                 ),
             )
     record = await composer.submit_and_observe(

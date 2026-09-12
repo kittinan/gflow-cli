@@ -55,7 +55,8 @@ async def _dump_radios(pane: Any, label: str) -> list[dict[str, Any]]:
                     "aria_label": await r.get_attribute("aria-label"),
                     "checked": await r.get_attribute("aria-checked"),
                     "ligatures": await r.evaluate(
-                        "el => [...el.querySelectorAll('i,mat-icon')].map(n => n.textContent.trim())"
+                        "el => [...el.querySelectorAll('i,mat-icon')]"
+                        ".map(n => n.textContent.trim())"
                     ),
                 }
             )
@@ -107,7 +108,8 @@ async def _main(profile: str, project_id: str, model_name: str) -> int:
                     {
                         "text": (await it.inner_text()).strip()[:50],
                         "ligatures": await it.evaluate(
-                            "el => [...el.querySelectorAll('i,mat-icon')].map(n => n.textContent.trim())"
+                            "el => [...el.querySelectorAll('i,mat-icon')]"
+                            ".map(n => n.textContent.trim())"
                         ),
                     }
                 )
