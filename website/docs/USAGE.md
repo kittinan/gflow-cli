@@ -756,13 +756,28 @@ gflow video r2v "blend these worlds" --ref a.png --ref b.png --ref c.png --model
 > `data-reference-type="entity"` with the id you asked for — Flow lists characters and
 > media under one search and does not rank them, so a file sharing the name can win.
 >
-> **`--duration` is refused on this path (exit 11).** The host offers reference-to-video
-> only at its base 8s tier. At 4s or 6s it does not refuse — it drops the references,
-> types their file *names* into the prompt and bills a text-to-video clip (measured at
-> zero credits, 2026-09-06). Because the editor remembers the last duration used, an r2v
-> run pins 8s itself rather than inheriting it. Pass no `--duration`, or `--duration 8`.
+> **`--duration 4` and `--duration 6` are refused on this path (exit 11).** At those two
+> lengths the host does not refuse — it drops the references, types their file *names*
+> into the prompt and bills a text-to-video clip (measured at zero credits, 2026-09-06).
+> Because the editor remembers the last duration used, an r2v run pins 8s itself rather
+> than inheriting it, so passing no `--duration` is safe.
+>
+> **`--duration 10` works, but only with `--model omni-flash`.** The duration row is
+> model state: a Veo tier renders 4s/6s/8s, while Omni 1.1 Flash renders 4s/6s/8s/**10s**
+> (measured on a live pane, 2026-09-12). A length the pane does not offer is refused by
+> the radio lookup with the same exit 11, naming what was asked for — so `--duration 10`
+> on a Veo tier is a clean refusal, not a silent 8s clip.
 
 ### Adding your Avatar to an r2v generation
+
+> **Not available on the migrated `flow.google.com` host (exit 36).** That editor
+> renders no likeness surface at all: measured 2026-09-12, zero `person` / `face` /
+> `account_circle` / `portrait` ligatures anywhere on it, and its toolbar Add menu offers
+> only Upload, New collection, Create character and New scene. `--avatar` is therefore
+> refused *before* submit — it used to pass every gate, including the free account-level
+> eligibility pre-flight, and bill a full-price clip with the presenter silently missing.
+> The substitute on that host is a **character entity**: `gflow character create`, then
+> `--reference-entity <id> --reference-entity-name <name>`.
 
 `--avatar` attaches your Flow Avatar (likeness) **alongside** the reference
 images, in one generation — Flow carries `referenceLikenesses` and

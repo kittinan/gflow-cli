@@ -398,6 +398,32 @@ def test_a_named_character_reference_is_served_now_that_a_submit_completes() -> 
     )
 
 
+def test_an_avatar_request_is_refused_because_this_host_has_no_likeness_surface() -> None:
+    """`--avatar` used to pass every gate and bill a clip with no presenter on it.
+
+    `_unported_form` never inspected `use_avatar`, and nothing in `migrated_composer`
+    attaches a likeness — `attach_start_frame` is i2v, `attach_references` is r2v,
+    `attach_character_entities` is entities. The client's free `likeness:checkEligibility`
+    pre-flight does not catch it either: it answers about the ACCOUNT, and a live account
+    answered `determined=True eligible=True` while this host still offered nothing to bind
+    to. That is the #716 silent-drop shape, one surface over.
+
+    Measured on the live editor 2026-09-12: zero `person` / `face` / `account_circle` /
+    `portrait` / `mood` ligatures anywhere on it, and the toolbar Add menu offers exactly
+    Upload, New collection, Create character and New scene — no Avatar entry. The
+    substitute this host DOES offer is a character entity, which is served.
+    """
+    from gflow_cli.api.transports.migrated_composer import _unported_form
+
+    assert _unported_form(_r2v(reference_images=(Path("a.png"),), use_avatar=True)) == (
+        "the Avatar (likeness)"
+    )
+    # Mode-independent, and ahead of the generic mode refusal: a Mode.AVATAR request is
+    # named for the thing it actually wants, not as "the avatar mode".
+    avatar_only = GenerateVideoRequest(prompt="walking", mode=Mode.AVATAR, aspect=Aspect.PORTRAIT)
+    assert _unported_form(avatar_only) == "the Avatar (likeness)"
+
+
 def test_a_character_run_is_moved_onto_the_migrated_host_like_any_other() -> None:
     """`migrated_can_serve` kept its own entity refusal after the port landed.
 

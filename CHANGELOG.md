@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--avatar` on the migrated host billed a clip with no presenter on it.**
+  `_unported_form` never inspected `use_avatar`, and nothing in `migrated_composer`
+  attaches a likeness — `attach_start_frame` is i2v-only, `attach_references` r2v-only,
+  `attach_character_entities` entities-only. The client's free `likeness:checkEligibility`
+  pre-flight does not cover it: it answers about the ACCOUNT, and a live account answered
+  `determined=True eligible=True` while this host offered nothing to bind to. So the
+  request passed every gate and submitted at full price without the Avatar — the #716
+  silent-drop shape, one surface over. It is now refused before submit (exit 36).
+
+  The refusal is measured, not assumed: on the live editor 2026-09-12 there are zero
+  `person` / `face` / `account_circle` / `portrait` / `mood` ligatures anywhere on the
+  surface, and the toolbar Add menu offers exactly Upload, New collection, Create
+  character and New scene. No Avatar entry exists to drive. The substitute this host does
+  offer is a character entity, which is served — `gflow character create`, then
+  `--reference-entity` with `--reference-entity-name`.
+
+- **r2v refused `--duration 10`, a length Flow actually offers.** The rule was "r2v must
+  be `R2V_DURATION_S` (8)", generalised from a real measurement that 4s and 6s drop the
+  references and bill a text-to-video clip carrying their file names. But the duration row
+  is **model state**, which `apply_video_settings` already knew for ordering and the rule
+  did not: measured on a live pane 2026-09-12, a Veo tier renders 4s/6s/8s while Omni 1.1
+  Flash renders 4s/6s/8s/**10s** and gains a 360p/720p row. 83 `abra_r2v_10s` records in a
+  live project corroborate that the 10s arm keeps its references — a dropped-reference run
+  submits a *text*-to-video key, so an r2v key at 10s is a run whose references survived.
+
+  The refusal now names only the two lengths measured to degrade, and a length the pane
+  does not render is refused by the radio lookup that already answers that question. Live:
+  `--model omni-flash --duration 10` with a character entity and a local `--ref` produced a
+  10.006 s 720x1280 clip, exit 0.
+
 - **Character references work on the migrated `flow.google.com` host — the gate that
   refused them was built on a failure that does not reproduce.** `_unported_form`
   refused every request carrying `reference_entities` with exit 36, on the measurement

@@ -199,6 +199,16 @@ INGREDIENTS_LIGATURE = "chrome_extension"
 #: text-to-video and bills a clip with the file NAMES typed into the prompt and none of
 #: the images on it.
 R2V_DURATION_S = 8
+#: r2v durations MEASURED to silently drop the references on this host: the run becomes a
+#: text-to-video with the reference FILE NAMES typed into the prompt, billed at full price
+#: (2026-09-06). Refusing these is not the same as refusing every length that is not
+#: :data:`R2V_DURATION_S` — the duration row is model-state, and a blanket rule refused a
+#: length Flow offers. Measured 2026-09-12 on one account: a veo tier renders 4s/6s/8s,
+#: while Omni 1.1 Flash renders 4s/6s/8s/**10s** (and gains a 360p/720p row). That the 10s
+#: arm keeps its references is corroborated by 83 `abra_r2v_10s` records in a live project:
+#: a dropped-reference run submits a TEXT-to-video key, so an r2v key at 10s is a run whose
+#: references survived. A length the pane does not offer is refused by `_select` itself.
+R2V_REFERENCE_DROPPING_DURATIONS_S = frozenset({4, 6})
 #: A mention chip in the prompt document — how a reference is represented once
 #: attached. Its ``data-reference-type`` decides which wire slot carries the id.
 MENTION_CHIP = ".mention-chip"
@@ -391,6 +401,17 @@ def _unported_form(request: GenerateVideoRequest) -> str | None:
     if request.reference_entities:
         if len(request.reference_entity_names) != len(request.reference_entities):
             return "character references without a matching --reference-entity-name"
+    # The Avatar/likeness has NO attach on this host — nothing in this module drives it.
+    # Like the entity check above this is MODE-INDEPENDENT and must stay ahead of every
+    # early return: `use_avatar` is legal on R2V and on Mode.AVATAR, and neither
+    # `attach_start_frame` (i2v), `attach_references` (r2v) nor
+    # `attach_character_entities` looks at it. Without this line the request passes every
+    # gate — including the client's free `likeness:checkEligibility` pre-flight, which
+    # answers about the ACCOUNT, not about this host — and submits a full-price clip with
+    # the presenter silently missing. That is the #716 failure exactly, and the refusal is
+    # free while the clip is not.
+    if request.attaches_likeness:
+        return "the Avatar (likeness)"
     if request.mode is Mode.T2V:
         return None
     if request.mode is Mode.R2V:
@@ -929,19 +950,24 @@ class MigratedComposer:
                 await self._select_model(page, pane, model)
             await self._select(page, pane, axis="aspect", lig=ASPECT_LIGATURE[request.aspect])
             if request.duration is not None:
-                if request.mode is Mode.R2V and request.duration != R2V_DURATION_S:
+                if (
+                    request.mode is Mode.R2V
+                    and request.duration in R2V_REFERENCE_DROPPING_DURATIONS_S
+                ):
                     raise ConfigurationError(
                         detail=(
-                            f"the migrated Flow host offers reference-to-video only at "
-                            f"{R2V_DURATION_S}s; at {request.duration}s it does not refuse but "
-                            "silently drops the references and submits a text-to-video run "
-                            "with their file names typed into the prompt — a full-price clip "
-                            "with none of the images on it"
+                            f"the migrated Flow host renders a {request.duration}s "
+                            "reference-to-video arm, but it does not refuse and does not "
+                            "honour it: it silently drops the references and submits a "
+                            "text-to-video run with their file names typed into the prompt "
+                            f"— a full-price clip with none of the images on it. Only "
+                            f"{R2V_DURATION_S}s is safe on every tier"
                         ),
                         remediation_hint=(
                             f"Drop --duration (r2v pins {R2V_DURATION_S}s on its own), pass "
-                            f"--duration {R2V_DURATION_S}, or run this length on labs with "
-                            "GFLOW_CLI_FLOW_HOST=labs.google."
+                            f"--duration {R2V_DURATION_S}, or use --model omni-flash, whose "
+                            "settings pane also offers 10s. To run 4s or 6s with references "
+                            "at all, use labs with GFLOW_CLI_FLOW_HOST=labs.google."
                         ),
                     )
                 await self._select(page, pane, axis="duration", text=f"{request.duration}s")

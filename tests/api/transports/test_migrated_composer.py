@@ -906,6 +906,45 @@ async def test_r2v_at_the_supported_duration_is_allowed_through() -> None:
     assert page.dom.groups["duration"][2].checked
 
 
+async def test_r2v_at_ten_seconds_is_allowed_because_the_row_is_model_state() -> None:
+    """The refusal used to be "r2v must be 8s", which refused a length Flow offers.
+
+    Measured 2026-09-12 on a live pane: a veo tier renders 4s/6s/8s, Omni 1.1 Flash
+    renders 4s/6s/8s/**10s** and gains a 360p/720p row — the duration row is model-state,
+    exactly as `apply_video_settings` already said about ordering. 83 `abra_r2v_10s`
+    records in a live project corroborate that the 10s arm KEEPS its references: a
+    dropped-reference run submits a text-to-video key, so an r2v key at 10s is a run whose
+    references survived. Only the measured reference-dropping lengths stay refused.
+    """
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakePage()
+    await MigratedComposer().apply_video_settings(page, _r2v_request(duration=10))
+    assert page.dom.groups["duration"][3].checked  # 10s
+    assert not page.dom.groups["duration"][2].checked  # 8s released
+
+
+async def test_r2v_at_six_seconds_is_still_refused() -> None:
+    """4s and 6s are the two lengths measured to drop the references, so narrowing the
+    rule must not quietly let them through with the rest."""
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakePage()
+    with pytest.raises(ConfigurationError, match="silently drops the references"):
+        await MigratedComposer().apply_video_settings(page, _r2v_request(duration=6))
+
+
+async def test_a_duration_the_pane_does_not_offer_is_refused_by_the_radio_lookup() -> None:
+    """Narrowing the pre-emptive rule hands the "not offered here" case to `_select`,
+    which already answers it as exit 11 rather than clicking nothing and submitting."""
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakePage()
+    page.dom.groups["duration"] = [Radio("", "4s"), Radio("", "6s"), Radio("", "8s", checked=True)]
+    with pytest.raises(ConfigurationError, match="no duration control offering"):
+        await MigratedComposer().apply_video_settings(page, _r2v_request(duration=10))
+
+
 async def test_stale_radio_that_never_flips_is_selector_drift_with_host() -> None:
     from gflow_cli.api.transports.migrated_composer import MigratedComposer
 
