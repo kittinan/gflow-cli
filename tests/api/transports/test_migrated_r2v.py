@@ -372,20 +372,43 @@ async def test_the_wrong_entity_is_refused_even_though_a_chip_landed() -> None:
         )
 
 
-def test_character_references_are_still_refused_until_a_submit_completes() -> None:
-    """The attach half is ported and proven; the submit half is not, so the gate stays.
+def test_a_named_character_reference_is_served_now_that_a_submit_completes() -> None:
+    """The gate this replaces demanded exactly one thing to lift it: a completed run.
 
-    `attach_character_entities` is verified live — the chip commits with the right
-    entity_id and Flow loads the character's voice — but the submit that follows produced
-    no reply in three runs. Until an entity-bound generation actually completes, refusing
-    instantly (exit 36) beats a 60-second timeout, so the gate must NOT be relaxed just
-    because the attach works. This test is the thing that stops that happening by
-    accident.
+    It refused every entity-bound request because the submit was believed to answer with
+    a null payload — `parse_frames` keeps only frames whose payload slot is a string, so
+    such a reply yields nothing, `submitted` never resolves, and the run exits 9 after
+    60 s while Flow generates anyway. That was measured once, on one account, in 2026-09.
+
+    It does not reproduce. A live r2v carrying `--reference-entity` plus a local `--ref`
+    (`veo-lite-lp`, 2026-09-12) logged `submit_reply_shape rpc=MZZa6b frames=1
+    submit_frames=1 body_bytes=6766` — a real payload naming the media id at status 6 —
+    then `jwpduf` 2 -> 3, `as29s`, and an 8 s 720x1280 clip on disk. Exit 0.
+
+    So the request is served, and the only thing still refused is the one the picker
+    genuinely cannot do: Flow's search offers no id to anchor on, so an entity with no
+    display name has nothing to type and would submit without it.
     """
     from gflow_cli.api.transports.migrated_composer import _unported_form
 
     assert _unported_form(_r2v(reference_entities=("ent-kael",))) is not None
     assert (
         _unported_form(_r2v(reference_entities=("ent-kael",), reference_entity_names=("Kael",)))
-        is not None
+        is None
     )
+
+
+def test_a_character_run_is_moved_onto_the_migrated_host_like_any_other() -> None:
+    """`migrated_can_serve` kept its own entity refusal after the port landed.
+
+    It only decides whether to pull an *unmoved* account onto the new host, so it never
+    fired for the accounts that needed it — an account Flow has already moved is routed
+    by its URL and never asks. Left in place it would send an unmoved account to the labs
+    driver for a request the migrated composer now serves.
+    """
+    from gflow_cli.api.transports.migrated_composer import migrated_can_serve
+
+    req = _r2v(reference_entities=("ent-kael",), reference_entity_names=("Kael",))
+    assert migrated_can_serve(req, "proj-1") is True
+    # The name requirement still travels with it: no name, no picker query, no move.
+    assert migrated_can_serve(_r2v(reference_entities=("ent-kael",)), "proj-1") is False

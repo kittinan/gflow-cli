@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Character references work on the migrated `flow.google.com` host — the gate that
+  refused them was built on a failure that does not reproduce.** `_unported_form`
+  refused every request carrying `reference_entities` with exit 36, on the measurement
+  that Flow answers an entity-bound submit with a null payload: `parse_frames` keeps only
+  frames whose payload slot is a string, so `["wrb.fr","MZZa6b",null,...]` yields nothing,
+  the `submitted` future never resolves, and the run exits 9 after `SUBMIT_REPLY_BUDGET_S`
+  while Flow generates anyway. An explicit refusal was, correctly, judged better than a
+  timeout reported on a running generation.
+
+  Re-measured live on 2026-09-12 (`video r2v --reference-entity` + a local `--ref`,
+  `veo-lite-lp`): `submit_reply_shape rpc=MZZa6b frames=1 submit_frames=1
+  body_bytes=6766` — a real payload naming the media id at status 6 — then `jwpduf`
+  2 -> 3, `as29s`, and an 8 s 720x1280 clip downloaded. Exit 0, 85 s end to end. The
+  submit half needs no fallback poll; only the gate had to go.
+
+  What is still refused is the one thing the picker cannot do without: an entity with no
+  `--reference-entity-name`. Flow's search offers no id to anchor on, so a nameless entity
+  has nothing to type and would submit without the character. `migrated_can_serve` loses
+  its own separate entity refusal, which could only ever have sent an *unmoved* account to
+  the labs driver for a request the migrated composer now serves. A new
+  `migrated.submit_reply_shape` log line records frame count and body size on every
+  submit, so "the reply came back empty" stays separable from "no reply arrived" in a
+  single run's log rather than needing three.
+
 - **The `/about` landing's `retryable=False` is now a measurement, not a preserved
   default.** A live occurrence was caught on a second account and the #756 stability
   probe re-run unmodified: **5/5** attempts landed on `/about` over ~3 minutes, on the

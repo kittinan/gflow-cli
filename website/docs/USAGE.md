@@ -745,8 +745,16 @@ gflow video r2v "blend these worlds" --ref a.png --ref b.png --ref c.png --model
 > whose references have not all attached is refused **before** submit (exit 32), and the
 > app's own submit body must carry every uploaded media id with a reference-to-video model
 > key (exit 7 otherwise) — the failure being a full-price clip with none of your references
-> on it. References given by `@Name` or `--reference-entity` (character entities) exit 36
-> there; an unmoved account keeps the labs driver for those.
+> on it. References given by `@Name` (a media asset by display name) exit 36 there; an
+> unmoved account keeps the labs driver for those.
+>
+> **Character entities ARE served here** — pass `--reference-entity <id>` together with
+> `--reference-entity-name <name>`. The name is not optional on this host: Flow's picker
+> searches by display name and offers no id to anchor on, so without one there is nothing
+> to type and the request is refused (exit 36) rather than submitted without the
+> character. The chip the picker commits is then read back and checked to carry
+> `data-reference-type="entity"` with the id you asked for — Flow lists characters and
+> media under one search and does not rank them, so a file sharing the name can win.
 >
 > **`--duration` is refused on this path (exit 11).** The host offers reference-to-video
 > only at its base 8s tier. At 4s or 6s it does not refuse — it drops the references,

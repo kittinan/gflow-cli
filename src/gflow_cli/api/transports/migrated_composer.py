@@ -376,56 +376,21 @@ def _unported_form(request: GenerateVideoRequest) -> str | None:
     start frame only: the Frames picker on this host lists assets by display name
     with no UUID in its DOM (2026-09-05 spike), so a frame given by media UUID or
     ``@Name`` has nothing to anchor on yet, and the End chip is unmeasured."""
-    # Character entities are a different attach surface (a chip with an entity_id, in a
-    # different wire slot) and unported. This check is MODE-INDEPENDENT and must stay
-    # ahead of every early return (#716): it used to live inside the R2V branch, so a
-    # t2v request returned `None` here without its entities ever being inspected, and
-    # nothing downstream attaches one — `attach_start_frame` is i2v-only,
-    # `attach_references` is r2v-only, the `read_chips` verification is r2v-only. The
-    # result was a BILLED generation with the entity silently dropped, which is strictly
-    # worse than exit 36: the refusal is free and the clip is a stranger.
+    # Character entities attach through the same `@` picker as media, but they are a
+    # DIFFERENT chip kind (data-reference-type="entity", carrying an entity_id). This
+    # check is MODE-INDEPENDENT and must stay ahead of every early return (#716): it
+    # used to live inside the R2V branch, so a t2v request returned `None` here without
+    # its entities ever being inspected, and the run generated a full-price clip with
+    # the character silently dropped.
     #
-    # `migrated_can_serve` also refuses on `reference_entities`, but it only feeds
-    # `prefer_migrated`, and an account Flow has already moved is routed by its URL
-    # without consulting it — so that refusal is unreachable for exactly the accounts
-    # that need it. This one is on the path every request takes.
+    # The port itself is done (#723): `attach_character_entities` drives the picker,
+    # commits the chip, and verifies BOTH its kind and its entity id before anything is
+    # submitted. What is required here is only the thing the picker cannot do without —
+    # a display name to type. Flow's search offers no id to anchor on, so an entity with
+    # no name has nothing to look up and the run would submit without it.
     if request.reference_entities:
-        # STILL REFUSED — but NOT because the backend rejects it. The port is half done
-        # in a narrower way than previously recorded here (#723).
-        #
-        # What works: `attach_character_entities` drives the `@` picker, commits the
-        # chip, and verifies it carries data-reference-type="entity" with the requested
-        # id. `migrated.character_entities_attached` fires and Flow loads the
-        # character's voice sample. And the SUBMIT IS ACCEPTED: measured 2026-09-07,
-        # entity-bound submissions appear in Flow's own gallery as **Queued** and
-        # proceed. Nothing is refused server-side.
-        #
-        # What breaks is the OBSERVER, and the mechanism is exact:
-        #
-        #   MZZa6b -> [["wrb.fr","MZZa6b",null,null,null,[5],"generic"]]
-        #
-        # The submit reply carries a NULL payload, so it never names a media id and the
-        # `submitted` future in submit_and_observe never resolves. That wait is bounded
-        # by SUBMIT_REPLY_BUDGET_S (60 s), a value calibrated on runs where "the submit
-        # reply arrived 4.0-4.6 s after the click" — i.e. a plate-based generation
-        # against an idle queue. So the run times out (exit 9, TransportTimeoutError)
-        # while the job sits in Flow's queue and completes on its own.
-        #
-        # This is also what the ORIGINAL note here described as "the submit never
-        # produces a reply, three runs, 60 s each, cause unknown". Three timeouts
-        # against a queue, read as a refusal. Two later comments (including one of
-        # mine) hardened that misreading further; both were wrong.
-        #
-        # Queue latency is not incidental: Flow documents a limit of FIVE concurrent
-        # generations, and rate-limits per-minute throughput after heavy daily use, so
-        # 60 s is routinely too short in real production.
-        #
-        # THE FIX, when someone takes it: on a null submit payload, fall through to the
-        # status poll (jwpduf/as29s) keyed on the project instead of requiring the
-        # submit reply to name the media id, and make the budget configurable. The guard
-        # stays only until that lands, because today the CLI would report a timeout on a
-        # generation that is actually running — worse than an honest refusal.
-        return "character references"
+        if len(request.reference_entity_names) != len(request.reference_entities):
+            return "character references without a matching --reference-entity-name"
     if request.mode is Mode.T2V:
         return None
     if request.mode is Mode.R2V:
@@ -453,7 +418,7 @@ def migrated_can_serve(request: GenerateVideoRequest, project_id: str | None) ->
     """Can the migrated composer take this request as it stands? Text-to-video, or
     image-to-video / reference-to-video from **local** files, in an existing project,
     with a model the new host offers (or none). Everything else — an end frame, a
-    frame or reference by UUID or ``@Name``, character references, a fresh project,
+    frame or reference by UUID or ``@Name``, a fresh project,
     a labs-only model — is not ported yet, so an unmoved account keeps the labs
     driver for it.
 
@@ -464,8 +429,6 @@ def migrated_can_serve(request: GenerateVideoRequest, project_id: str | None) ->
     moved is routed by its URL and never reaches this question — for it,
     ``--model veo-lite-lp`` is driven by its matcher instead of refused outright."""
     if _unported_form(request) is not None or not project_id:
-        return False
-    if request.reference_entities:
         return False
     return request.model is None or request.model in VIDEO_MODEL_MENU_LABELS
 
@@ -1858,7 +1821,22 @@ class MigratedComposer:
                 text = await response.text()
             except Exception:  # noqa: BLE001 - an aborted/streamed body is not our frame
                 return
-            for rid, payload in parse_frames(text):
+            frames = parse_frames(text)
+            if rpcid in SUBMIT_RPCS:
+                # `parse_frames` keeps only frames whose payload slot is a STRING, so a
+                # reply shaped `["wrb.fr","MZZa6b",null,...]` yields NOTHING here and the
+                # `submitted` future silently never resolves — the exit-9 timeout #723
+                # read as a refusal. Naming the discrepancy makes "the reply came back
+                # empty" separable from "no reply arrived" in a single run's log.
+                log.info(
+                    "migrated.submit_reply_shape",
+                    rpc=rpcid,
+                    frames=len(frames),
+                    submit_frames=sum(1 for rid, _ in frames if rid in SUBMIT_RPCS),
+                    body_bytes=len(text),
+                    rpc_in_body=rpcid in text,
+                )
+            for rid, payload in frames:
                 if rid in SUBMIT_RPCS and not submitted.done():
                     try:
                         rec = generation_record(rid, payload)
