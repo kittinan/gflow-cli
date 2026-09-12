@@ -26,11 +26,14 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from gflow_cli.api.transports.migrated_composer import (  # noqa: E402
+    ADD_MENU_POPOVER,
     INGREDIENTS_LIGATURE,
     LIKENESS_CHIP,
+    PROMPT_BOX_ADD,
     MigratedComposer,
     _ligature,
 )
+from gflow_cli.api.video import VideoModel  # noqa: E402
 
 from _spike_common import build_client, resolve_profile_dir  # noqa: E402, isort: skip
 
@@ -69,8 +72,8 @@ MODEL_KEY = re.compile(
 )
 
 
-async def _main(profile: str, project_id: str, ref: Path, order: str) -> int:
-    report: dict[str, Any] = {"order": order}
+async def _main(profile: str, project_id: str, ref: Path, order: str, model: str) -> int:
+    report: dict[str, Any] = {"order": order, "model": model}
     composer = MigratedComposer()
     async with build_client(resolve_profile_dir(profile)) as client:
         page = client._page  # noqa: SLF001
@@ -80,11 +83,47 @@ async def _main(profile: str, project_id: str, ref: Path, order: str) -> int:
         try:
             await composer._select(page, pane, axis="mode", lig="videocam")  # noqa: SLF001
             await composer._select(page, pane, axis="submode", lig=INGREDIENTS_LIGATURE)  # noqa: SLF001
+            if model:
+                await composer._select_model(page, pane, VideoModel(model))  # noqa: SLF001
         finally:
             await composer._close_pane(page, strict=False)  # noqa: SLF001
 
         media_ids: tuple[str, ...] = ()
-        if order == "avatar-only":
+        if order == "popover-both":
+            # The route a human actually uses: BOTH the image and the avatar come from the
+            # prompt-box popover's own asset list, never from the `@` mention picker. The
+            # popover has Images/Uploads tabs alongside Avatars; the driver had only ever
+            # tried mentions, so every previous "Flow refuses" reading was about the
+            # mention picker, not about Flow.
+            media_ids = (await composer._upload_via_toolbar(page, project_id, ref),)  # noqa: SLF001
+            await page.wait_for_timeout(1500)
+            await page.locator(PROMPT_BOX_ADD).first.click(timeout=5000)
+            await page.wait_for_timeout(2000)
+            items = page.locator(f"{ADD_MENU_POPOVER} flow-add-menu-asset-item")
+            report["popover_items"] = await items.count()
+            picked = None
+            for i in range(await items.count()):
+                txt = (await items.nth(i).inner_text()).strip()
+                if ref.name in txt:
+                    picked = txt[:40]
+                    await items.nth(i).click(timeout=5000)
+                    break
+            report["picked_from_popover"] = picked
+            await page.wait_for_timeout(1500)
+            # Clicking an asset only SELECTS it — the detail pane's action is what puts it
+            # on the prompt. (The avatar differs: its click attaches AND dismisses.)
+            action = page.locator(f"{ADD_MENU_POPOVER} flow-add-menu-detail-pane button").first
+            report["detail_action_found"] = bool(await action.count())
+            if await action.count():
+                report["detail_action_text"] = (await action.inner_text()).strip()[:40]
+                await action.click(timeout=5000)
+                await page.wait_for_timeout(2000)
+            report["chips_after_popover_pick"] = await composer.read_chips(page)
+            report["popover_open_after_pick"] = bool(await page.locator(ADD_MENU_POPOVER).count())
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(600)
+            await composer.attach_avatar(page)
+        elif order == "avatar-only":
             await composer.attach_avatar(page)
         elif order == "ref-first":
             media_ids = await composer.attach_references(page, project_id, (ref,))
@@ -157,10 +196,13 @@ def main() -> int:
     ap.add_argument("project_id")
     ap.add_argument("ref", type=Path)
     ap.add_argument(
-        "--order", choices=("ref-first", "avatar-first", "avatar-only"), default="ref-first"
+        "--order",
+        choices=("ref-first", "avatar-first", "avatar-only", "popover-both"),
+        default="ref-first",
     )
+    ap.add_argument("--model", default="omni_flash", help="empty string to leave as-is")
     args = ap.parse_args()
-    return asyncio.run(_main(args.profile, args.project_id, args.ref, args.order))
+    return asyncio.run(_main(args.profile, args.project_id, args.ref, args.order, args.model))
 
 
 if __name__ == "__main__":

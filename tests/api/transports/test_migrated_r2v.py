@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from gflow_cli.api.transports.migrated_composer import FRAME_SEARCH_ATTEMPTS
-from gflow_cli.api.video import Aspect, GenerateVideoRequest, Mode
+from gflow_cli.api.video import Aspect, GenerateVideoRequest, Mode, VideoModel
 from gflow_cli.errors import ReferenceNotFoundError
 
 pytestmark = pytest.mark.anyio
@@ -398,43 +398,47 @@ def test_a_named_character_reference_is_served_now_that_a_submit_completes() -> 
     )
 
 
-def test_the_avatar_alone_is_served_but_never_alongside_references() -> None:
-    """The Avatar IS on this host; what it cannot do is share a submit.
+def test_the_avatar_rides_with_references_only_on_omni_flash() -> None:
+    """Whether a likeness may share a prompt with a reference is MODEL state.
 
-    A first pass concluded there was no likeness surface at all. That was wrong twice
-    over: it clicked the PROJECT toolbar `add` (Upload / New collection / Create character
-    / New scene) rather than the prompt box's own, and it looked for a `face` ligature
-    while the popover was shut. Opened properly, the popover's side nav carries an Avatars
-    tab and `attach_avatar` drives it — verified live, `gflow video avatar` exit 0.
+    This shipped first as a blanket refusal, on two $0 body captures that agreed the
+    uploaded media id was absent. Both were taken on whatever veo tier the editor
+    remembered, because the spike set mode and sub-mode and never selected a model — so
+    they measured the tier, not the feature. The account owner said plainly that it works
+    in Flow's own UI, which it does. Re-measured with the model selected first:
 
-    The real limit is combination. Measured at $0 by blocking the page's own fetch/XHR and
-    reading the body it tried to send: with a likeness attached Flow submits
-    `veo_3_1_r2v_lite_low_priority` carrying three likeness ids and the project, and
-    nothing for the uploaded reference — identical in shape whether or not a reference chip
-    sits on the prompt. A billed run had already shown it as exit 7, "missing 1 of 1
-    uploaded reference". So the clip would carry the presenter and none of the product.
+        omni-flash -> abra_r2v_10s, and the uploaded media id IS in the body
+        veo tiers  -> the upload is absent
+
+    Live on omni-flash: `--ref ... --avatar --duration 10` returned exit 0 and a 10.006 s
+    720x1280 clip. The duration row is model state in the same way (10s only there), so
+    this is the rule on this host rather than a special case.
+
+    `--model` is REQUIRED for the combination: with `model=None` the editor submits on
+    whatever tier it last used, which is precisely the silent drop being guarded against.
     """
     from gflow_cli.api.transports.migrated_composer import _unported_form
 
-    # Prompt + likeness only: served.
+    ref = (Path("a.png"),)
+    assert (
+        _unported_form(_r2v(reference_images=ref, use_avatar=True, model=VideoModel.OMNI_FLASH))
+        is None
+    )
+
+    # A veo tier drops the reference, so it is refused — and the message names the model.
+    assert (
+        _unported_form(_r2v(reference_images=ref, use_avatar=True, model=VideoModel.VEO_3_1_LITE))
+        == "the Avatar together with references on veo_3_1_lite"
+    )
+
+    # No explicit model is refused too: the editor would pick the remembered tier.
+    assert _unported_form(_r2v(reference_images=ref, use_avatar=True)) == (
+        "the Avatar together with references on no explicit --model"
+    )
+
+    # The avatar ALONE stays served on any tier — nothing to drop.
     avatar_only = GenerateVideoRequest(prompt="walking", mode=Mode.AVATAR, aspect=Aspect.PORTRAIT)
     assert _unported_form(avatar_only) is None
-
-    # With a local reference, or a character, the reference is the thing Flow drops.
-    assert _unported_form(_r2v(reference_images=(Path("a.png"),), use_avatar=True)) == (
-        "the Avatar together with references"
-    )
-    assert (
-        _unported_form(
-            _r2v(
-                reference_images=(Path("a.png"),),
-                reference_entities=("ent-kael",),
-                reference_entity_names=("Kael",),
-                use_avatar=True,
-            )
-        )
-        == "the Avatar together with references"
-    )
 
 
 def test_a_character_run_is_moved_onto_the_migrated_host_like_any_other() -> None:

@@ -208,8 +208,10 @@ LIKENESS_CHIP = "flow-prompt-box flow-likeness-ingredient-chip"
 ADD_MENU_DETAIL_ACTION = "flow-add-menu-detail-pane button"
 #: How long the Avatars tab is given to populate before its emptiness is believed. The
 #: intro view renders while the list is still loading, so reading it immediately after the
-#: tab click reports "no avatar" for an account that owns one — measured 2026-09-12.
-AVATAR_LIST_BUDGET_S = 6.0
+#: tab click reports "no avatar" for an account that owns one — measured 2026-09-12, and
+#: measured again at 6 s, which was still too short on a second run and told an account
+#: WITH an avatar that it had none. The wait is cheap; a false 'you have no avatar' is not.
+AVATAR_LIST_BUDGET_S = 15.0
 UPLOAD_MENU_ITEM = f"{OVERLAY} {MENU_ITEM}:has(mat-icon:text-is('upload'))"
 EMPTY_CHIP = "flow-prompt-box button.empty-chip"
 BOUND_CHIP = "flow-prompt-box button.chip-container:has(img)"
@@ -436,19 +438,26 @@ def _unported_form(request: GenerateVideoRequest) -> str | None:
         if len(request.reference_entity_names) != len(request.reference_entities):
             return "character references without a matching --reference-entity-name"
     # The Avatar IS served on this host — behind the prompt box's own `add`, the side-nav
-    # tab with the `face` ligature — and `attach_avatar` drives it. What it cannot do is
-    # share a submit with anything else.
+    # tab with the `face` ligature — and `attach_avatar` drives it.
     #
-    # Measured at $0 on 2026-09-12 by blocking the page's own fetch/XHR and reading the
-    # body it tried to send: with a likeness attached, Flow submits
-    # `veo_3_1_r2v_lite_low_priority` carrying three likeness ids, the project, and
-    # NOTHING for the uploaded reference — byte-identical in shape whether or not a
-    # reference chip is on the prompt. A billed run had already proved it the expensive
-    # way (exit 7, "missing 1 of 1 uploaded reference"). The reference is not merely
-    # unordered in the body; it is absent, so the clip would carry the presenter and none
-    # of the product. Refusing is free.
+    # It can share a prompt with references, but ONLY on Omni 1.1 Flash. This was first
+    # shipped as a blanket refusal on the strength of two measurements that both happened
+    # to run on whatever veo tier the editor remembered, where the reference really is
+    # dropped: the submit goes out as `veo_3_1_r2v_lite_low_priority` carrying three
+    # likeness ids and the project and nothing for the upload. Re-measured at $0 with the
+    # model actually selected first, the same gestures produce:
+    #
+    #   omni-flash -> abra_r2v_10s, and the uploaded media id IS in the body
+    #   veo tiers  -> the upload is absent
+    #
+    # The duration row behaves the same way (10s only on omni-flash), so "this is model
+    # state" is the rule here, not the exception. `--model` is therefore REQUIRED for the
+    # combination: with `model=None` the editor submits on whatever tier it last used, and
+    # that is exactly the silent-drop this refusal exists to prevent.
     if request.attaches_likeness and (request.reference_images or request.reference_entities):
-        return "the Avatar together with references"
+        if request.model is not VideoModel.OMNI_FLASH:
+            named = request.model.value if request.model else "no explicit --model"
+            return f"the Avatar together with references on {named}"
     if request.mode is Mode.T2V:
         return None
     if request.mode is Mode.AVATAR:
@@ -1690,7 +1699,7 @@ class MigratedComposer:
             if not await items.count():
                 # The list never populated. The intro view says why, and says it is not a
                 # gflow fault: the account owns no avatar. Without it, the popover changed.
-                if await page.locator(LIKENESS_INTRO).count():
+                if await page.locator(LIKENESS_INTRO).first.is_visible():
                     raise AvatarUnavailableError(
                         "this Google account has no Flow Avatar yet: the Avatars tab is "
                         "showing its 'Get started' introduction rather than an avatar to "

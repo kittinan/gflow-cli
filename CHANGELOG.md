@@ -9,45 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`--avatar` on the migrated host billed a clip with no presenter on it — and the
-  first fix for it was wrong.** `_unported_form` never inspected `use_avatar`, and nothing
-  in `migrated_composer` attached a likeness, so the request passed every gate (including
-  the free `likeness:checkEligibility` pre-flight, which answers about the ACCOUNT — a live
+- **`--avatar` on the migrated host: first it billed a clip with no presenter, then it
+  was refused too broadly.** `_unported_form` never inspected `use_avatar`, and nothing in
+  `migrated_composer` attached a likeness, so the request passed every gate (including the
+  free `likeness:checkEligibility` pre-flight, which answers about the ACCOUNT — a live
   account answered `eligible=True` throughout) and submitted at full price with the
   presenter missing: the #716 silent-drop shape, one surface over.
 
-  It was first fixed by refusing `--avatar` outright, on a spike that found no likeness
-  surface. That spike was wrong twice: it clicked the PROJECT toolbar `add` — whose menu is
-  Upload / New collection / Create character / New scene — rather than the prompt box's own
-  `add`, which the driver's own selector already excludes as a separate button; and it
-  searched for a `face` ligature while that popover was closed. Opened properly, the
-  popover's side nav carries an **Avatars** tab. `attach_avatar` now drives it: prompt-box
-  `add` -> the tab anchored on its `face` glyph -> the avatar -> proof that a
-  `flow-likeness-ingredient-chip` appeared. That chip, not a mention, is the evidence —
-  attaching a likeness leaves `read_chips` untouched, because the likeness is a separate
-  wire slot exactly as `referenceLikenesses` is on labs.
+  The surface was found by fixing a bad spike. The first one clicked the PROJECT toolbar
+  `add` — whose menu is Upload / New collection / Create character / New scene — instead
+  of the prompt box's own `add`, which this module's own selector already excludes as a
+  separate button, and it searched for a `face` ligature while that popover was closed.
+  Opened properly, the popover's side nav carries an **Avatars** tab. `attach_avatar` now
+  drives it, and proves the attach by a `flow-likeness-ingredient-chip` appearing in the
+  prompt box — not by a mention, because a likeness is a separate wire slot exactly as
+  `referenceLikenesses` is on labs. `Mode.AVATAR` is no longer refused, so
+  `gflow video avatar` is served (live, exit 0).
 
-  `gflow video avatar` is therefore served on the migrated host (live 2026-09-12, exit 0),
-  and `Mode.AVATAR` is no longer refused as "the avatar mode".
+  **Combining the avatar with references is model state, and the first fix got that
+  wrong.** It shipped as a blanket refusal on two $0 body captures that agreed the
+  uploaded media id was absent — both taken on whatever veo tier the editor remembered,
+  because the spike set mode and sub-mode and never selected a model. It measured the
+  tier and reported it as the feature. The account owner pointed out that it works in
+  Flow's own UI; re-measured with the model selected first:
 
-  What IS refused is the combination. Measured at $0 by patching the page's own `fetch`
-  and `XMLHttpRequest` and reading the body it tried to send: a likeness-bearing submit
-  goes out as `veo_3_1_r2v_lite_low_priority` carrying three likeness ids plus the project
-  and **nothing** for the uploaded reference — identical in shape whether or not a
-  reference chip sits on the prompt. A billed run had already shown it as exit 7, "missing
-  1 of 1 uploaded reference".
+      omni-flash  ->  abra_r2v_10s, uploaded media id IS in the body
+      veo tiers   ->  the upload is absent
 
-  The opposite attach order fails differently, which is what rules out an ordering
-  workaround: with the likeness attached FIRST, the `@` picker offers only the avatar
-  (`the picker offered: Me`) and the reference cannot be attached at all. A likeness run
-  is exclusive on this host. So `--avatar` with `--ref` or `--reference-entity` is exit 36
-  naming that combination, and the remedy is a character entity, which carries both.
+  So the combination is served on `--model omni-flash` (live 2026-09-12: `--ref ...
+  --avatar --duration 10`, exit 0, 10.006 s 720x1280 clip) and refused elsewhere — and
+  refused when no `--model` is given at all, since the editor would submit on its
+  remembered tier, which is the silent drop this guard exists to prevent. The duration row
+  is model state in the same way, so this is the rule on this host, not a special case.
 
-  Measuring the second order needed a lever worth recording: the popover leaves a
-  `.cdk-overlay-backdrop` that survives both Escape and a click on itself and then
-  intercepts every later click, so the spike removes it with a `MutationObserver`. That
-  is deliberately spike-only — production never attaches anything after the avatar, since
-  the combination is refused.
+  An account that has never recorded an avatar is exit 39: the Avatars tab renders its
+  onboarding introduction instead of a list, which `likeness:checkEligibility` cannot see.
+  The list is given `AVATAR_LIST_BUDGET_S` to populate first, and the check reads
+  visibility rather than presence.
 
 - **r2v refused `--duration 10`, a length Flow actually offers.** The rule was "r2v must
   be `R2V_DURATION_S` (8)", generalised from a real measurement that 4s and 6s drop the

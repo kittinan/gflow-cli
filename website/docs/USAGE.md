@@ -770,33 +770,26 @@ gflow video r2v "blend these worlds" --ref a.png --ref b.png --ref c.png --model
 
 ### Adding your Avatar to an r2v generation
 
-> **On the migrated `flow.google.com` host the Avatar works ALONE, never alongside
-> references (exit 36).** `gflow video avatar` is served there — the prompt box's own
-> **+** button opens a popover whose side nav carries an Avatars tab, and gflow attaches
-> your likeness from it. But combining it with `--ref` or `--reference-entity` is refused
-> before submit. Flow refuses the pairing in two different ways, both measured at zero
-> cost on 2026-09-12, one per attach order:
+> **On the migrated `flow.google.com` host, `--avatar` with references requires
+> `--model omni-flash`.** Whether a likeness may share a prompt with a reference is model
+> state there, the same way the duration row is:
 >
-> - **reference first, then the avatar** — the reference attaches, and the submit body
->   then carries three likeness ids and the project and **nothing** for the upload,
->   identical in shape to an avatar-only submit. The clip would show the presenter and
->   none of the product.
-> - **avatar first, then the reference** — the `@` picker offers only the avatar itself
->   (`the picker offered: Me`), so the reference cannot be attached at all.
+> ```
+> omni-flash  ->  abra_r2v_10s, and the uploaded media id IS on the wire   ✅
+> veo tiers   ->  the upload is absent — a clip with the presenter, no product  ❌
+> ```
 >
-> A likeness run is exclusive on this host; it is not an ordering problem gflow can work
-> around.
+> So gflow refuses the combination on any other tier, and on **no explicit `--model`** —
+> the editor would otherwise submit on whatever tier it last used, which is exactly the
+> silent drop being guarded against. Verified live 2026-09-12: `--ref product.png
+> --avatar --model omni-flash --duration 10` returned exit 0 and a 10.006 s 720x1280 clip.
 >
-> So on that host, pick one:
->
-> - **presenter only** → `gflow video avatar "<prompt>" --project <id>`
-> - **presenter + product** → a character instead of the Avatar: `gflow character create`,
->   then `gflow video r2v ... --reference-entity <id> --reference-entity-name <name>
->   --ref product.png`, which does carry both.
+> `gflow video avatar` (prompt + likeness, no references) is served on any tier, since
+> there is nothing to drop.
 >
 > If your account has never recorded an avatar, the Avatars tab shows its onboarding
-> introduction instead of one, and gflow fails with exit 39 telling you so — Flow's free
-> eligibility check reports whether you *may* use an avatar, not whether you *have* one.
+> introduction instead of one and gflow fails with exit 39 — Flow's free eligibility check
+> reports whether you *may* use an avatar, not whether you *have* one.
 
 `--avatar` attaches your Flow Avatar (likeness) **alongside** the reference
 images, in one generation — Flow carries `referenceLikenesses` and
