@@ -774,10 +774,18 @@ gflow video r2v "blend these worlds" --ref a.png --ref b.png --ref c.png --model
 > references (exit 36).** `gflow video avatar` is served there — the prompt box's own
 > **+** button opens a popover whose side nav carries an Avatars tab, and gflow attaches
 > your likeness from it. But combining it with `--ref` or `--reference-entity` is refused
-> before submit, because Flow silently drops the reference: measured at zero cost
-> 2026-09-12, a likeness-bearing submit carries three likeness ids and the project and
-> **nothing** for the uploaded reference — identical whether or not a reference chip is on
-> the prompt. The clip would show the presenter and none of the product.
+> before submit. Flow refuses the pairing in two different ways, both measured at zero
+> cost on 2026-09-12, one per attach order:
+>
+> - **reference first, then the avatar** — the reference attaches, and the submit body
+>   then carries three likeness ids and the project and **nothing** for the upload,
+>   identical in shape to an avatar-only submit. The clip would show the presenter and
+>   none of the product.
+> - **avatar first, then the reference** — the `@` picker offers only the avatar itself
+>   (`the picker offered: Me`), so the reference cannot be attached at all.
+>
+> A likeness run is exclusive on this host; it is not an ordering problem gflow can work
+> around.
 >
 > So on that host, pick one:
 >

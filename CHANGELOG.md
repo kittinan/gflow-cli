@@ -35,9 +35,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   goes out as `veo_3_1_r2v_lite_low_priority` carrying three likeness ids plus the project
   and **nothing** for the uploaded reference — identical in shape whether or not a
   reference chip sits on the prompt. A billed run had already shown it as exit 7, "missing
-  1 of 1 uploaded reference". So `--avatar` with `--ref` or `--reference-entity` is now
-  exit 36 naming that combination, and the remedy is a character entity, which carries
-  both.
+  1 of 1 uploaded reference".
+
+  The opposite attach order fails differently, which is what rules out an ordering
+  workaround: with the likeness attached FIRST, the `@` picker offers only the avatar
+  (`the picker offered: Me`) and the reference cannot be attached at all. A likeness run
+  is exclusive on this host. So `--avatar` with `--ref` or `--reference-entity` is exit 36
+  naming that combination, and the remedy is a character entity, which carries both.
+
+  Measuring the second order needed a lever worth recording: the popover leaves a
+  `.cdk-overlay-backdrop` that survives both Escape and a click on itself and then
+  intercepts every later click, so the spike removes it with a `MutationObserver`. That
+  is deliberately spike-only — production never attaches anything after the avatar, since
+  the combination is refused.
 
 - **r2v refused `--duration 10`, a length Flow actually offers.** The rule was "r2v must
   be `R2V_DURATION_S` (8)", generalised from a real measurement that 4s and 6s drop the

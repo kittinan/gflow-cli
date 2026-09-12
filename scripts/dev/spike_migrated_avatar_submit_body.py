@@ -91,6 +91,29 @@ async def _main(profile: str, project_id: str, ref: Path, order: str) -> int:
             await composer.attach_avatar(page)
         else:
             await composer.attach_avatar(page)
+            # The popover leaves a `.cdk-overlay-backdrop` that survives both Escape and a
+            # click on itself (measured), and it intercepts the upload button's click. This
+            # is a MEASUREMENT lever only — production never attaches anything after the
+            # avatar, because the combination is refused. Ripping the node out is the only
+            # way to reach the question this spike exists to answer.
+            # One sweep is not enough: the backdrop is re-created, and the NEXT click
+            # (the composer) is blocked again. A MutationObserver keeps the page clear for
+            # the rest of the run.
+            await page.evaluate(
+                """() => {
+                    window.__killed = 0;
+                    const kill = () => {
+                      for (const n of document.querySelectorAll('.cdk-overlay-backdrop')) {
+                        n.remove(); window.__killed++;
+                      }
+                    };
+                    kill();
+                    new MutationObserver(kill).observe(document.body,
+                        {childList: true, subtree: true});
+                }"""
+            )
+            await page.wait_for_timeout(500)
+            report["backdrops_removed"] = await page.evaluate("() => window.__killed || 0")
             media_ids = await composer.attach_references(page, project_id, (ref,))
         report["uploaded_media_ids"] = list(media_ids)
         report["likeness_chips"] = await page.locator(LIKENESS_CHIP).count()
