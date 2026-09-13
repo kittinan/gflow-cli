@@ -366,6 +366,8 @@ def auth_status(profile: str | None) -> None:
 
     # Files on disk say nothing about whether the session still works — prove
     # it (issue #471). Fail-closed: only a verified session exits 0.
+    from datetime import UTC, datetime
+
     from rich.markup import escape
 
     from gflow_cli.auth import verification
@@ -391,6 +393,16 @@ def auth_status(profile: str | None) -> None:
         sys.exit(1)
     who = f" as [bold]{escape(status_result.user_email)}[/bold]" if status_result.user_email else ""
     console.print(f"[green]Flow session verified{who}.[/green]")
+    # Flow's sessions are short — roughly a day — and nothing else tells the user when the
+    # next 401 is due. The body already carries `expires`; printing it is the difference
+    # between planning a batch run and discovering the deadline halfway through one.
+    if status_result.expires_at is not None:
+        left = status_result.expires_at - datetime.now(UTC)
+        hours, remainder = divmod(max(int(left.total_seconds()), 0), 3600)
+        console.print(
+            f"[dim]Expires {status_result.expires_at:%Y-%m-%d %H:%M:%S} UTC "
+            f"— {hours}h {remainder // 60}m from now.[/dim]"
+        )
 
 
 @auth.command("list")

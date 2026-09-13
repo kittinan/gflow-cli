@@ -92,6 +92,10 @@ class FlowSessionStatus:
     outcome: FlowSessionOutcome
     user_email: str | None
     source: str  # caller-supplied log label ("chrome"/"internal"); never from response/cookie data
+    #: When Flow says this session stops working, or None when the body did not say.
+    #: A timestamp, never a secret — safe to print, and the only way a user can find out
+    #: how long they have before the next 401 without re-running a login.
+    expires_at: datetime | None = None
 
     @property
     def detail(self) -> str:
@@ -120,6 +124,24 @@ def _validate_profile_in_home(profile_dir: Path) -> None:
 _REFRESH_NEEDED = "ACCESS_TOKEN_REFRESH_NEEDED"
 
 
+def _parse_expires(parsed: dict[str, Any]) -> datetime | None:
+    """The body's ``expires`` as an aware datetime, or None when it cannot be read.
+
+    Never raises: a shape this cannot parse must leave every verdict unchanged.
+    """
+    expires = parsed.get("expires")
+    if not isinstance(expires, str) or not expires:
+        return None
+    try:
+        # NextAuth emits RFC 3339 with a trailing `Z`, which `fromisoformat` only learned
+        # to parse in 3.11 — the project floor — but normalise anyway rather than depend
+        # on it.
+        deadline = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return deadline if deadline.tzinfo else deadline.replace(tzinfo=UTC)
+
+
 def _is_stale(parsed: dict[str, Any]) -> bool:
     """Is this 200 session body one that will answer 401 on the next real call?
 
@@ -135,19 +157,8 @@ def _is_stale(parsed: dict[str, Any]) -> bool:
     error = parsed.get("error")
     if isinstance(error, str) and error:
         return True
-    expires = parsed.get("expires")
-    if not isinstance(expires, str) or not expires:
-        return False
-    try:
-        # NextAuth emits RFC 3339 with a trailing `Z`, which `fromisoformat` only learned
-        # to parse in 3.11 — the project floor — but normalise anyway rather than depend
-        # on it, and never let a parse failure decide the verdict.
-        deadline = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    if deadline.tzinfo is None:
-        deadline = deadline.replace(tzinfo=UTC)
-    return deadline <= datetime.now(UTC)
+    deadline = _parse_expires(parsed)
+    return deadline is not None and deadline <= datetime.now(UTC)
 
 
 def evaluate_session_response(
@@ -166,8 +177,12 @@ def evaluate_session_response(
     never retained beyond this function.
     """
 
+    expires_at: datetime | None = None
+
     def _result(outcome: FlowSessionOutcome, email: str | None = None) -> FlowSessionStatus:
-        return FlowSessionStatus(outcome=outcome, user_email=email, source=source)
+        return FlowSessionStatus(
+            outcome=outcome, user_email=email, source=source, expires_at=expires_at
+        )
 
     if status_code != 200:
         return _result(FlowSessionOutcome.VERIFICATION_ERROR)
@@ -182,6 +197,7 @@ def evaluate_session_response(
         return _result(FlowSessionOutcome.VERIFICATION_ERROR)
 
     parsed_dict = cast("dict[str, Any]", parsed)
+    expires_at = _parse_expires(parsed_dict)
     user = parsed_dict.get("user")
     if user is None or user == {}:
         # Authenticated-shaped endpoint reachable, but no Flow session.

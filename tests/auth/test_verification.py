@@ -206,6 +206,36 @@ class TestExpiredSessionIsNotAuthenticated:
         assert status.outcome is FlowSessionOutcome.AUTHENTICATED
 
 
+class TestExpiryIsReportedBackToTheUser:
+    """Flow's sessions last about a day, and nothing told the user when the next 401 was
+    due. The body already carries `expires`; the verdict now carries it too, so
+    `gflow auth status` can print a deadline instead of a bare "verified"."""
+
+    def test_a_live_session_reports_when_it_ends(self) -> None:
+        deadline = datetime.now(UTC) + timedelta(hours=16)
+        status = evaluate_session_response(
+            200, _session_body(expires=deadline), google_session=True, source="chrome"
+        )
+        assert status.outcome is FlowSessionOutcome.AUTHENTICATED
+        assert status.expires_at is not None
+        # Serialised to whole seconds, so compare at that resolution.
+        assert abs((status.expires_at - deadline).total_seconds()) < 1
+
+    def test_an_expired_session_still_reports_its_deadline(self) -> None:
+        """The timestamp is most useful precisely when it has passed — it answers "since
+        when?", which is the difference between "log in again" and "something else broke"."""
+        status = evaluate_session_response(200, EXPIRED_BODY, google_session=True, source="chrome")
+        assert status.outcome is FlowSessionOutcome.EXPIRED
+        assert status.expires_at is not None
+        assert status.expires_at < datetime.now(UTC)
+
+    def test_an_unreadable_expiry_is_reported_as_unknown_not_guessed(self) -> None:
+        body = json.dumps({"user": {"email": "a@b.c"}, "expires": "whenever"})
+        status = evaluate_session_response(200, body, google_session=True, source="chrome")
+        assert status.outcome is FlowSessionOutcome.AUTHENTICATED
+        assert status.expires_at is None
+
+
 class TestVerifyFlowSession:
     @pytest.fixture
     def gflow_home(self, tmp_path: Path) -> Path:

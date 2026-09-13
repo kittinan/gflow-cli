@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`gflow auth status` now prints when the session expires.** Flow's sessions last about
+  a day, and nothing told you when the next 401 was due — the deadline was only
+  discoverable by reading the raw session body by hand. `FlowSessionStatus` carries
+  `expires_at` (a timestamp, never a secret), and the command prints it with the time
+  remaining. An expired session reports its deadline too: "since when?" is what separates
+  "log in again" from "something else broke".
+
 ### Fixed
 
 - **`gflow auth login` could not mint a session at all, and then reported success
