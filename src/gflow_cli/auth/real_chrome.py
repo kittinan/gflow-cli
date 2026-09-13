@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import structlog
 from rich.console import Console
 
+from gflow_cli.auth import verification
 from gflow_cli.browser_manager import is_playwright_chrome_channel_available
 from gflow_cli.config import Settings, get_settings
 from gflow_cli.errors import (
@@ -485,6 +486,8 @@ class RealChromeStrategy(AuthStrategy):
             # selects the system Chrome channel. Load-bearing — must persist here.
             assert status.user_email, "AUTHENTICATED outcome must carry a non-empty user_email"
             (profile_dir / ".gflow_account").write_text(status.user_email, encoding="utf-8")
+            # Cache the deadline so a later run can warn about it without a round trip.
+            verification.record_session_expiry(profile_dir, status.expires_at)
             _console.print(f"[green][OK] Flow session verified ({status.user_email}).[/green]")
         else:
             logger.warning(

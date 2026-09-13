@@ -236,6 +236,54 @@ class TestExpiryIsReportedBackToTheUser:
         assert status.expires_at is None
 
 
+class TestSessionExpiryCache:
+    """The deadline lives only in Flow's session body — it sits inside an encrypted JWE
+    cookie, so nothing local can read it, and probing the endpoint at the start of every
+    generation would add a round trip to every run. It is cached whenever a probe learns
+    it, and read by a pre-flight that only ever WARNS."""
+
+    def test_a_recorded_deadline_reads_back(self, tmp_path: Path) -> None:
+        from gflow_cli.auth.verification import read_session_expiry, record_session_expiry
+
+        when = datetime.now(UTC) + timedelta(hours=5)
+        record_session_expiry(tmp_path, when)
+        assert read_session_expiry(tmp_path) == when
+
+    def test_recording_none_clears_a_stale_deadline(self, tmp_path: Path) -> None:
+        """A probe that cannot read the expiry must not leave the previous answer standing
+        — a stale deadline that has 'passed' would warn on every run forever."""
+        from gflow_cli.auth.verification import read_session_expiry, record_session_expiry
+
+        record_session_expiry(tmp_path, datetime.now(UTC) + timedelta(hours=5))
+        record_session_expiry(tmp_path, None)
+        assert read_session_expiry(tmp_path) is None
+
+    def test_no_cache_reads_as_none(self, tmp_path: Path) -> None:
+        from gflow_cli.auth.verification import read_session_expiry
+
+        assert read_session_expiry(tmp_path) is None
+
+    def test_a_corrupt_cache_is_ignored_not_raised(self, tmp_path: Path) -> None:
+        """This feeds a diagnostic. A profile with a garbled cache must still RUN."""
+        from gflow_cli.auth.verification import SESSION_EXPIRY_FILE, read_session_expiry
+
+        (tmp_path / SESSION_EXPIRY_FILE).write_text("not a timestamp", encoding="utf-8")
+        assert read_session_expiry(tmp_path) is None
+
+    def test_a_naive_timestamp_is_read_as_utc(self, tmp_path: Path) -> None:
+        from gflow_cli.auth.verification import SESSION_EXPIRY_FILE, read_session_expiry
+
+        (tmp_path / SESSION_EXPIRY_FILE).write_text("2026-09-13T19:42:21", encoding="utf-8")
+        got = read_session_expiry(tmp_path)
+        assert got is not None and got.tzinfo is not None
+
+    def test_an_unwritable_profile_never_raises(self, tmp_path: Path) -> None:
+        """Losing a warning is acceptable; failing a login over a cache write is not."""
+        from gflow_cli.auth.verification import record_session_expiry
+
+        record_session_expiry(tmp_path / "does" / "not" / "exist", datetime.now(UTC))
+
+
 class TestVerifyFlowSession:
     @pytest.fixture
     def gflow_home(self, tmp_path: Path) -> Path:

@@ -397,6 +397,8 @@ def auth_status(profile: str | None) -> None:
     # next 401 is due. The body already carries `expires`; printing it is the difference
     # between planning a batch run and discovering the deadline halfway through one.
     if status_result.expires_at is not None:
+        # Keep the cache the run-start pre-flight reads in step with what we just learned.
+        verification.record_session_expiry(auth_mod.profile_dir(name), status_result.expires_at)
         left = status_result.expires_at - datetime.now(UTC)
         hours, remainder = divmod(max(int(left.total_seconds()), 0), 3600)
         console.print(

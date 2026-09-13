@@ -22,7 +22,7 @@ import sys
 import time
 import uuid
 from dataclasses import replace as _dataclass_replace
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, Self, TypeVar, cast
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -644,6 +644,46 @@ class FlowApiClient:
         except Exception as exc:  # noqa: BLE001 — best-effort; must never break launch
             logger.warning("client.preread_flow_cookies_failed", error=type(exc).__name__)
             self._preread_flow_cookies = {}
+        self._warn_if_session_expiring()
+
+    def _warn_if_session_expiring(self) -> None:
+        """Say so BEFORE a long run when the Flow session is about to lapse.
+
+        Flow sessions last roughly a day and do not roll forward: reading the session
+        endpoint re-issues the cookie but never moves `expires` (measured 2026-09-13), and
+        once the deadline passes even a real browser cannot refresh it — the same endpoint
+        keeps answering ACCESS_TOKEN_REFRESH_NEEDED. So the only cure is a human re-login,
+        and the only kindness available is notice: a batch that dies at clip 30 of 50 costs
+        far more than a warning nobody needed.
+
+        Reads the cached deadline rather than probing, so it adds no round trip. The cache
+        can be stale (a login elsewhere moves the real deadline), which is exactly why this
+        only ever warns — it never refuses a run.
+        """
+        try:
+            from gflow_cli.auth.verification import EXPIRY_WARN_WINDOW, read_session_expiry
+
+            deadline = read_session_expiry(self.profile_dir)
+            if deadline is None:
+                return
+            left = deadline - datetime.now(UTC)
+            if left <= timedelta(0):
+                logger.warning(
+                    "client.flow_session_expired",
+                    expired_at=deadline.isoformat(),
+                    hint=(
+                        "run `gflow auth login --profile <name>` — a lapsed session cannot refresh"
+                    ),
+                )
+            elif left <= EXPIRY_WARN_WINDOW:
+                logger.warning(
+                    "client.flow_session_expiring",
+                    expires_at=deadline.isoformat(),
+                    minutes_left=int(left.total_seconds() // 60),
+                    hint="re-run `gflow auth login` before starting a long batch",
+                )
+        except Exception:  # noqa: BLE001 — a diagnostic must never break a run
+            logger.debug("client.session_expiry_check_failed", exc_info=True)
 
     async def _ensure_context_session_cookie(self) -> None:
         """Diagnostic + seed (issue #222): log whether the launched persistent

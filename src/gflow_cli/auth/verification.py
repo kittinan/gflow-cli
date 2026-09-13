@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, cast
 
@@ -431,3 +431,52 @@ async def verify_flow_profile(
             status_code=status_code,
         )
     return result
+
+
+#: Filename inside a profile holding the last known session deadline, ISO-8601 UTC.
+#: Cached because the deadline lives only in Flow's session body: the expiry is inside an
+#: encrypted JWE cookie, so nothing local can read it, and probing the endpoint at the
+#: start of every generation would add a network round trip to every run. Written whenever
+#: a probe learns the answer (login, `auth status`), read by the cheap pre-flight.
+SESSION_EXPIRY_FILE = ".gflow_session_expires"
+#: How close to the deadline a run starts warning. Flow sessions last about a day, so an
+#: hour or two of notice is enough to re-login before a long batch rather than during one.
+EXPIRY_WARN_WINDOW = timedelta(hours=2)
+
+
+def record_session_expiry(profile_dir: Path, expires_at: datetime | None) -> None:
+    """Cache *expires_at* beside the profile. Best-effort: never raises.
+
+    A missing or unwritable file simply means the pre-flight stays quiet, which is the
+    behaviour that existed before this cache. Losing a warning is acceptable; failing a
+    login because a cache write failed is not.
+    """
+    path = profile_dir / SESSION_EXPIRY_FILE
+    try:
+        if expires_at is None:
+            path.unlink(missing_ok=True)
+            return
+        path.write_text(expires_at.isoformat(), encoding="utf-8")
+    except OSError:
+        logger.debug("session_expiry_cache_write_failed", exc_info=True)
+
+
+def read_session_expiry(profile_dir: Path) -> datetime | None:
+    """The cached deadline, or None when absent/unreadable. Never raises.
+
+    The cache can be STALE — a login performed by another process, or on another machine
+    with a transplanted profile, moves the real deadline without touching this file. It is
+    therefore only ever used to raise a warning, never to refuse a run: a wrong warning
+    costs a glance, a wrong refusal costs the whole command.
+    """
+    try:
+        raw = (profile_dir / SESSION_EXPIRY_FILE).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)

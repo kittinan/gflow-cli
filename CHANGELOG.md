@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A run warns before it starts when the Flow session is about to lapse — or already
+  has.** A batch that dies at clip 30 of 50 costs far more than a warning nobody needed,
+  and there was no way to see the deadline coming.
+
+  The deadline is cached beside the profile (`.gflow_session_expires`) whenever a probe
+  learns it — login, or `gflow auth status` — and read by a pre-flight at client start, so
+  it adds no round trip to a run. It can go stale (a login elsewhere moves the real
+  deadline), which is exactly why it only ever WARNS and never refuses: a wrong warning
+  costs a glance, a wrong refusal costs the command.
+
+  **Auto-refresh was investigated and does not work**, so notice is the whole remedy.
+  Measured 2026-09-13: reading the session endpoint re-issues
+  `__Secure-next-auth.session-token` on every call (a fresh JWE each time) but never moves
+  `expires` — three reads 40 s apart, deadline unchanged — so the session is absolute, not
+  rolling. And on a profile that had already lapsed 2.6 hours earlier, opening that
+  endpoint twice inside a real Chrome context left both `expires` and
+  `error: ACCESS_TOKEN_REFRESH_NEEDED` untouched, in the page and on disk. A lapsed
+  session cannot be revived; only a human re-login mints a new one.
+
 - **`gflow auth status` now prints when the session expires.** Flow's sessions last about
   a day, and nothing told you when the next 401 was due — the deadline was only
   discoverable by reading the raw session body by hand. `FlowSessionStatus` carries
