@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, cast
 
@@ -59,6 +60,12 @@ class FlowSessionOutcome(StrEnum):
 
     AUTHENTICATED = "authenticated"
     GOOGLE_SESSION_ONLY = "google_session_only"
+    #: A Flow session exists and names the user, but is no longer usable: its `expires`
+    #: has passed, or the body carries an `error` (`ACCESS_TOKEN_REFRESH_NEEDED`) saying
+    #: the access token needs re-minting. Distinct from GOOGLE_SESSION_ONLY because the
+    #: user DID complete a Flow sign-in — it simply aged out — and distinct from
+    #: AUTHENTICATED because every tRPC call with it answers 401.
+    EXPIRED = "expired"
     NO_SESSION = "no_session"
     VERIFICATION_ERROR = "verification_error"
 
@@ -66,6 +73,7 @@ class FlowSessionOutcome(StrEnum):
 _DETAIL_BY_OUTCOME: dict[FlowSessionOutcome, str] = {
     FlowSessionOutcome.AUTHENTICATED: "Flow app session verified.",
     FlowSessionOutcome.GOOGLE_SESSION_ONLY: "Signed in to Google, but not to the Flow app.",
+    FlowSessionOutcome.EXPIRED: "The Flow app session has expired.",
     FlowSessionOutcome.NO_SESSION: "No sign-in detected.",
     FlowSessionOutcome.VERIFICATION_ERROR: "Could not verify the Flow session.",
 }
@@ -104,6 +112,42 @@ def _validate_profile_in_home(profile_dir: Path) -> None:
         raise SecurityError(
             msg,
         ) from None
+
+
+#: Values Flow puts in the session body's `error` slot that mean the access token can no
+#: longer be used as-is. Anything unrecognised is treated as stale too: an error slot that
+#: is populated at all has never been observed on a working session.
+_REFRESH_NEEDED = "ACCESS_TOKEN_REFRESH_NEEDED"
+
+
+def _is_stale(parsed: dict[str, Any]) -> bool:
+    """Is this 200 session body one that will answer 401 on the next real call?
+
+    Two independent signals, either of which is enough:
+
+    * a non-empty ``error`` slot (``ACCESS_TOKEN_REFRESH_NEEDED`` is the observed value);
+    * an ``expires`` timestamp that is already in the past.
+
+    Unparseable or absent fields are NOT treated as stale — this predicate only ever
+    downgrades a session on positive evidence, so a shape change cannot lock a working
+    profile out of its own login.
+    """
+    error = parsed.get("error")
+    if isinstance(error, str) and error:
+        return True
+    expires = parsed.get("expires")
+    if not isinstance(expires, str) or not expires:
+        return False
+    try:
+        # NextAuth emits RFC 3339 with a trailing `Z`, which `fromisoformat` only learned
+        # to parse in 3.11 — the project floor — but normalise anyway rather than depend
+        # on it, and never let a parse failure decide the verdict.
+        deadline = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=UTC)
+    return deadline <= datetime.now(UTC)
 
 
 def evaluate_session_response(
@@ -151,6 +195,14 @@ def evaluate_session_response(
     user_dict = cast("dict[str, Any]", user)
     email = user_dict.get("email")
     if isinstance(email, str) and email:
+        # A `user` block is NOT proof the session works. Measured 2026-09-12/13 on two
+        # profiles: the endpoint answered 200 with a full `user`, `expires` already in the
+        # past and `error: "ACCESS_TOKEN_REFRESH_NEEDED"`, while every tRPC call made with
+        # those same cookies answered 401 Unauthorized. Reading only `user.email` reported
+        # such a profile as AUTHENTICATED, so `gflow auth login` printed success over a
+        # dead session and the user learned the truth from a 401 hours later.
+        if _is_stale(parsed_dict):
+            return _result(FlowSessionOutcome.EXPIRED, email)
         return _result(FlowSessionOutcome.AUTHENTICATED, email)
 
     # `user` present but no usable email — unexpected shape (see spec §10).

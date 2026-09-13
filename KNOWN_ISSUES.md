@@ -14,6 +14,28 @@ Living list of behaviour that's broken, surprising, or limited by design — alo
 
 ## Open
 
+### `labs.google/fx/tools/flow` 308s to `flow.google.com`, so login must use the NextAuth page
+
+- **Status:** Mitigated (v0.73.2) · **Severity:** High until fixed (no account could log in)
+- **Affects:** `gflow auth login`, every account
+
+`labs.google/fx/tools/flow` answers **308 Permanent Redirect** to `flow.google.com/`,
+cookieless and account-independent (measured 2026-09-12 and 2026-09-13). The labs NextAuth
+app never loads, so its sign-in callback never runs and
+`__Secure-next-auth.session-token` is never minted — while `verify_flow_session`'s only
+oracle is `labs.google/fx/api/auth/session`. Logins failed with "Signed in to your Google
+account, but the Flow app sign-in wasn't completed" even though the user had signed in.
+
+`gflow auth login` now opens `https://labs.google/fx/api/auth/signin` instead, which is
+still served (200, no redirect). Press **Sign in with Google** there and let the callback
+land back on a `labs.google` page.
+
+**Sessions are short.** A minted session carried roughly a one-day `expires`. When it
+lapses the endpoint still answers 200 with a full `user` block plus
+`error: ACCESS_TOKEN_REFRESH_NEEDED`, and every tRPC call answers 401 — gflow reports that
+as exit 3 `AuthExpiredError` now, and `auth login` reports it as expired rather than
+claiming success.
+
 ### Flow is migrating to `flow.google.com`; generation coverage is partial but includes images
 
 - **Status:** Open (partially resolved) · **Severity:** High for unported forms · **Affected:** on accounts the rollout has reached, `gflow video t2v`, local-file `video i2v` / `r2v`, `gflow image t2i`, and local-file `gflow image i2i` now run on the migrated host. Image mode supports Nano Banana 2 / Pro, the four aspect ratios its radiogroup was enumerated with (16:9, 4:3, 1:1, 9:16), and count 1–4; `3:4` had no radio in that enumeration and is refused before submit rather than reported as selector drift. Image refs by UUID, `@Name` / `--reference-entity`, Agent instructions, Imagen 4, video end frames, video refs by UUID/name, scenes, extend, instructions and tools are not ported yet and fail before submit. **`character` is NOT in that list any more** — `character create` and `character list` work on the migrated host, and so does driving a character INTO a video: `video t2v` / `video r2v` with `--reference-entity <id> --reference-entity-name <name>` attaches the entity chip, verifies its id, and completes (live 2026-09-12, `veo-lite-lp`, 8s clip on disk). The name is required on this host because the picker searches by display name only. Character references on the **image** path remain unported, The **Avatar/likeness** is served on the migrated host. Alone (`gflow video avatar`) it works on any tier; **combined with `--ref` or `--reference-entity` it requires `--model omni-flash`**, because that is model state: omni-flash submits `abra_r2v_10s` with the uploaded media id on the wire (live 2026-09-12, exit 0, 10.006s clip), while a veo tier submits the likeness and drops the upload. gflow refuses the combination on other tiers and when no `--model` is given, since the editor would use its remembered tier. An account that has never recorded an avatar gets exit 39 naming the Avatars tab's onboarding step. `--duration` on r2v accepts 8s on any tier and 10s on `omni-flash`; 4s and 6s stay refused because the host drops the references at those lengths. Of the remainder, only the i2v-by-UUID case rests on a positive observation of absence (the Frames picker tiles carry no media id); `scenes`, `extend`, `instructions` and `tools` remain *unported by gflow*, never proven impossible on the host.

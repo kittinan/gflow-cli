@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -17,18 +18,38 @@ from gflow_cli.auth.verification import (
 )
 from gflow_cli.errors import SecurityError
 
+
 # Representative authenticated /api/auth/session body. Sanitised — no real
 # PII. Pins the endpoint contract: if Google changes the response shape, the
 # AUTHENTICATED assertions below fail loudly instead of the change going silent.
-AUTHENTICATED_BODY = json.dumps(
-    {
+def _session_body(*, expires: datetime, error: str | None = None) -> str:
+    """A captured session body with a caller-chosen expiry.
+
+    `expires` used to be the literal string from the original capture. That made the
+    fixture rot: once real time passed it, the body described an EXPIRED session and the
+    "authenticated" tests failed for a reason that had nothing to do with the code under
+    test. Expiry is now stated relative to now, so the fixture keeps meaning what its name
+    says.
+    """
+    body: dict[str, object] = {
         "user": {
             "name": "Test User",
             "email": "test.user@example.com",
             "image": "https://lh3.googleusercontent.com/a/fake",
         },
-        "expires": "2026-06-16T08:39:21.000Z",
+        "expires": expires.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
     }
+    if error is not None:
+        body["error"] = error
+    return json.dumps(body)
+
+
+AUTHENTICATED_BODY = _session_body(expires=datetime.now(UTC) + timedelta(days=1))
+#: The shape a real profile answered with on 2026-09-13: a full `user`, an `expires`
+#: already in the past, and Flow's own refresh marker. Every tRPC call made with those
+#: cookies answered 401.
+EXPIRED_BODY = _session_body(
+    expires=datetime.now(UTC) - timedelta(hours=2), error="ACCESS_TOKEN_REFRESH_NEEDED"
 )
 
 
@@ -140,6 +161,49 @@ def _build_verify_mock(
 
     mock_ap = MagicMock(name="async_playwright", return_value=mock_cm)
     return mock_ap, mock_ctx
+
+
+class TestExpiredSessionIsNotAuthenticated:
+    """A `user` block is not proof the session works.
+
+    Measured on two live profiles (2026-09-12 and 2026-09-13): the endpoint answered 200
+    with a complete `user`, an `expires` in the past and `error:
+    ACCESS_TOKEN_REFRESH_NEEDED`, while every tRPC call made with those same cookies
+    answered 401 Unauthorized. Reading only `user.email` reported that as AUTHENTICATED, so
+    `gflow auth login` printed success over a dead session and the user found out from a
+    401 hours later.
+    """
+
+    def test_an_expired_session_is_reported_as_expired(self) -> None:
+        status = evaluate_session_response(200, EXPIRED_BODY, google_session=True, source="chrome")
+        assert status.outcome is FlowSessionOutcome.EXPIRED
+        assert status.authenticated is False
+        # The email survives: naming the account is what makes the message actionable.
+        assert status.user_email == "test.user@example.com"
+
+    def test_a_past_expiry_alone_is_enough(self) -> None:
+        body = _session_body(expires=datetime.now(UTC) - timedelta(seconds=30))
+        status = evaluate_session_response(200, body, google_session=True, source="chrome")
+        assert status.outcome is FlowSessionOutcome.EXPIRED
+
+    def test_a_refresh_error_alone_is_enough(self) -> None:
+        body = _session_body(
+            expires=datetime.now(UTC) + timedelta(days=1), error="ACCESS_TOKEN_REFRESH_NEEDED"
+        )
+        status = evaluate_session_response(200, body, google_session=True, source="chrome")
+        assert status.outcome is FlowSessionOutcome.EXPIRED
+
+    def test_an_unreadable_expiry_never_downgrades_a_working_session(self) -> None:
+        """Fail OPEN on a shape change: this predicate may only demote on positive
+        evidence, or a Flow-side format tweak locks every user out of their own login."""
+        body = json.dumps({"user": {"email": "a@b.c"}, "expires": "whenever"})
+        status = evaluate_session_response(200, body, google_session=True, source="chrome")
+        assert status.outcome is FlowSessionOutcome.AUTHENTICATED
+
+    def test_a_missing_expiry_never_downgrades_a_working_session(self) -> None:
+        body = json.dumps({"user": {"email": "a@b.c"}})
+        status = evaluate_session_response(200, body, google_session=True, source="chrome")
+        assert status.outcome is FlowSessionOutcome.AUTHENTICATED
 
 
 class TestVerifyFlowSession:

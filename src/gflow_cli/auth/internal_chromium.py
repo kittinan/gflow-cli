@@ -20,7 +20,10 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 _console = Console()
 
-GEMINI_URL = "https://labs.google/fx/tools/flow?hl=en"
+#: See `real_chrome.GEMINI_URL` for why this is the NextAuth sign-in page rather
+#: than the Flow app: `labs.google/fx/tools/flow` now 308s to flow.google.com, so
+#: the labs sign-in callback never runs and no session is minted.
+GEMINI_URL = "https://labs.google/fx/api/auth/signin"
 GOOGLE_REJECTED_BROWSER_ROUTE = "accounts.google.com/v3/signin/rejected"
 POLL_INTERVAL_SECONDS = 3
 

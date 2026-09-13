@@ -30,12 +30,29 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 _console = Console()
 
-GEMINI_URL = "https://labs.google/fx/tools/flow?hl=en"
+#: Where a login run points the browser.
+#:
+#: NOT `labs.google/fx/tools/flow` any more. That URL now answers **308 Permanent
+#: Redirect** to `flow.google.com/` — measured 2026-09-12 and again 2026-09-13, with no
+#: cookies at all, so it is not an account-level handoff — and the labs NextAuth app
+#: therefore never loads. Its sign-in callback never runs, `__Secure-next-auth.session-token`
+#: is never minted, and `verify_flow_session`'s only oracle
+#: (`labs.google/fx/api/auth/session`) correctly reports an empty body. Every login on a
+#: migrated account failed that way, while the user had in fact signed in perfectly well on
+#: the new host.
+#:
+#: The NextAuth API under `/fx/api/auth/` is still served: `providers` and `csrf` answer
+#: 200, and `signin` renders its own page (200, no redirect). That page is what mints the
+#: session gflow needs, so the login run goes straight there.
+GEMINI_URL = "https://labs.google/fx/api/auth/signin"
 
 # User-facing guidance per non-authenticated verification outcome (issue #15).
 _UNVERIFIED_MESSAGE: dict[FlowSessionOutcome, str] = {
     FlowSessionOutcome.GOOGLE_SESSION_ONLY: (
         "Signed in to your Google account, but the Flow app sign-in wasn't completed."
+    ),
+    FlowSessionOutcome.EXPIRED: (
+        "Your Flow session has expired — it still names your account, but Flow rejects it."
     ),
     FlowSessionOutcome.NO_SESSION: "No sign-in detected.",
     FlowSessionOutcome.VERIFICATION_ERROR: (
@@ -46,6 +63,10 @@ _UNVERIFIED_HINT: dict[FlowSessionOutcome, str] = {
     FlowSessionOutcome.GOOGLE_SESSION_ONLY: (
         "Re-run `gflow auth login` and continue until the Flow editor "
         "(the prompt box / your projects) loads."
+    ),
+    FlowSessionOutcome.EXPIRED: (
+        "Re-run `gflow auth login` to mint a fresh session. Signing in to Google again is "
+        "not enough on its own — the Flow app session is the part that aged out."
     ),
     FlowSessionOutcome.NO_SESSION: (
         "Re-run `gflow auth login`, sign in to Google, and continue until the Flow editor loads."
@@ -93,14 +114,21 @@ def _print_login_instructions() -> None:
     _console.print("\n" + "=" * 60)
     _console.print("[bold cyan]BROWSER SIGN-IN[/bold cyan]")
     _console.print("=" * 60)
-    _console.print("1. A Google Chrome window opens at the Flow sign-in page.")
-    _console.print("2. Sign in with your Google account.")
+    _console.print("1. A Google Chrome window opens at Flow's sign-in page.")
     _console.print(
-        "3. [bold yellow]Keep going until the Flow editor itself loads[/bold yellow] "
-        "— the prompt box and your projects.",
+        "2. Press [bold]Sign in with Google[/bold] and finish signing in with your account.",
     )
     _console.print(
-        "   Signing in to Google is NOT enough; gflow needs a completed Flow app sign-in.",
+        "3. [bold yellow]Wait until the browser lands back on a labs.google page"
+        "[/bold yellow] — that callback is what mints the session gflow reads.",
+    )
+    _console.print(
+        "   Signing in to Google is NOT enough on its own; gflow needs the Flow app "
+        "session, and it is minted by the callback, not by the Google login.",
+    )
+    _console.print(
+        "   [dim]If you land on flow.google.com instead, that is fine — but come back to "
+        "https://labs.google/fx/api/auth/signin and finish there.[/dim]",
     )
     _console.print(
         "4. That's it — gflow detects the sign-in and [bold]closes Chrome for you[/bold], "

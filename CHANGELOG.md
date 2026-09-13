@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gflow auth login` could not mint a session at all, and then reported success
+  anyway.** Two independent faults that combined into a silent one.
+
+  The login run navigated to `labs.google/fx/tools/flow?hl=en`. That URL now answers
+  **308 Permanent Redirect** to `flow.google.com/` — measured 2026-09-12 and again
+  2026-09-13, with no cookies at all, so it is not a per-account handoff. The labs NextAuth
+  app therefore never loads, its sign-in callback never runs,
+  `__Secure-next-auth.session-token` is never minted, and the session probe correctly sees
+  an empty body. Every login on a migrated account failed that way while the user had in
+  fact signed in perfectly well. The NextAuth API under `/fx/api/auth/` is still served
+  (`providers` and `csrf` answer 200; `signin` renders its own page, 200, no redirect), so
+  the login run goes straight there and the on-screen steps now describe that page.
+
+- **An expired Flow session verified as authenticated.** `evaluate_session_response` read
+  `user.email` and ignored both `expires` and `error`. Measured on two live profiles: the
+  endpoint answered 200 with a complete `user`, an `expires` already hours in the past and
+  `error: "ACCESS_TOKEN_REFRESH_NEEDED"`, while every tRPC call made with those same
+  cookies answered 401 Unauthorized. So `auth login` printed success over a dead session,
+  wrote the account marker, and the user discovered the truth from an `AuthExpiredError`
+  hours later.
+
+  A new `FlowSessionOutcome.EXPIRED` now names that state — distinct from
+  `GOOGLE_SESSION_ONLY`, because the Flow sign-in *was* completed and merely aged out — and
+  carries its own message and remediation. The predicate demotes a session only on positive
+  evidence (a non-empty `error`, or an `expires` that has passed); an unparseable or absent
+  `expires` leaves the verdict alone, so a Flow-side format change cannot lock users out of
+  their own login. The `AUTHENTICATED_BODY` test fixture is now expressed relative to now:
+  it carried a literal captured timestamp, which real time walked past, so the fixture
+  itself had started describing an expired session.
+
 - **`--avatar` on the migrated host: first it billed a clip with no presenter, then it
   was refused too broadly.** `_unported_form` never inspected `use_avatar`, and nothing in
   `migrated_composer` attached a likeness, so the request passed every gate (including the
