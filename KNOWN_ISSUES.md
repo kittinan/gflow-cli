@@ -665,7 +665,7 @@ currently succeed via the e2e transport path.
 
 ### Browser session expires periodically — manual re-login required
 
-- **Status:** Open · **Severity:** Medium · **Affects:** all versions · **Tracked:** N/A (architectural)
+- **Status:** Mitigated · **Severity:** Medium · **Affects:** all versions · **Tracked:** N/A (architectural)
 
 Google's web session cookies aren't permanent. They expire when:
 - Long stretch of inactivity (typically months)
@@ -675,6 +675,14 @@ Google's web session cookies aren't permanent. They expire when:
 
 When this happens, the next API call returns 401/403 and `gflow-cli` raises `AuthExpiredError`.
 
+**Mitigated for the common case.** Flow's own app session (the labs.google NextAuth
+cookie) expires far more often than the Google session does. When only the former is gone,
+`FlowApiClient` re-mints it automatically — the same silent round trip Flow's "Sign in"
+button performs (`auth/relogin.py`, log event `auth.flow_session_refresh`). No click needed.
+
+**Still manual** when the Google session itself is gone or Google wants a human (password,
+2FA, CAPTCHA, account chooser): the refresh stops at once and the command exits `3`.
+
 **Workaround:**
 ```bash
 gflow auth login --profile <name>
@@ -682,7 +690,7 @@ gflow auth login --profile <name>
 
 Re-running `auth login` reuses the existing profile dir (you typically just click "Continue as <you>" on the Google account chooser). No data is lost; only the cookie jar is refreshed.
 
-**Why we don't auto-refresh:** Google's session-refresh flow can include CAPTCHA / device verification that only a human can complete. A community SDK can't reliably automate that step. See [docs/AUTHENTICATION.md § Refresh / expiry](docs/AUTHENTICATION.md#refresh--expiry).
+**Why the full re-login is not automated:** Google's session-refresh flow can include CAPTCHA / device verification that only a human can complete. A community SDK can't reliably automate that step. See [docs/AUTHENTICATION.md § Refresh / expiry](docs/AUTHENTICATION.md#refresh--expiry).
 
 **Roadmap:** not scheduled. The Phase 4 hardening pass (v0.4.0a2) added typed `AuthExpiredError` + exit code `3` so scripts can branch on auth expiry deterministically. A periodic "session liveness" check + a `gflow auth refresh` command are still candidates for a later phase, but not committed to a version yet.
 

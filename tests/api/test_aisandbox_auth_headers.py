@@ -118,3 +118,131 @@ async def test_fetch_access_token_raises_without_context():
     c._context = None
     with pytest.raises(AuthMissingError):
         await c._fetch_access_token()
+
+
+class _SeqCtxRequest:
+    """Returns the scripted session bodies in order (sticky last)."""
+
+    def __init__(self, bodies: list[str]) -> None:
+        self._bodies = bodies
+        self.calls = 0
+
+    async def get(self, url: str) -> _FakeApiResp:
+        body = self._bodies[min(self.calls, len(self._bodies) - 1)]
+        self.calls += 1
+        return _FakeApiResp(200, body)
+
+
+class _SeqContext:
+    def __init__(self, bodies: list[str]) -> None:
+        self.request = _SeqCtxRequest(bodies)
+
+
+_NO_TOKEN = '{"user":{"email":"x@y.z"}}'
+_TOKEN = '{"access_token":"ya29.FRESH","expires":"2999-01-01T00:00:00Z"}'
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_missing_token_triggers_one_silent_relogin(monkeypatch):
+    """Expired NextAuth session + live Google SSO → re-mint, then return the token."""
+    c = _make_client()
+    c._context = _SeqContext(["{}", _TOKEN])
+    calls: list[object] = []
+
+    async def fake_refresh(ctx):
+        calls.append(ctx)
+        return True
+
+    monkeypatch.setattr("gflow_cli.api.client.refresh_flow_session", fake_refresh)
+    token, _exp = await c._fetch_access_token()
+    assert token == "ya29.FRESH"
+    assert calls == [c._context]
+    assert c._context.request.calls == 2
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_failed_relogin_still_raises_exit_3(monkeypatch):
+    c = _make_client()
+    c._context = _SeqContext([_NO_TOKEN])
+
+    async def fake_refresh(ctx):
+        return False
+
+    monkeypatch.setattr("gflow_cli.api.client.refresh_flow_session", fake_refresh)
+    with pytest.raises(AisandboxAuthError):
+        await c._fetch_access_token()
+    # No re-read after a refresh that did not land back on Flow.
+    assert c._context.request.calls == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_relogin_is_attempted_once_per_client(monkeypatch):
+    c = _make_client()
+    c._context = _SeqContext([_NO_TOKEN])
+    calls: list[object] = []
+
+    async def fake_refresh(ctx):
+        calls.append(ctx)
+        return True
+
+    monkeypatch.setattr("gflow_cli.api.client.refresh_flow_session", fake_refresh)
+    for _ in range(2):
+        with pytest.raises(AisandboxAuthError):
+            await c._fetch_access_token()
+    assert len(calls) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_concurrent_misses_share_one_relogin(monkeypatch):
+    """Pooled pages missing the token together must not each start a sign-in."""
+    import asyncio
+
+    c = _make_client()
+    c._context = _SeqContext(["{}", "{}", _TOKEN])
+    calls: list[object] = []
+
+    async def fake_refresh(ctx):
+        calls.append(ctx)
+        await asyncio.sleep(0.01)
+        return True
+
+    monkeypatch.setattr("gflow_cli.api.client.refresh_flow_session", fake_refresh)
+    results = await asyncio.gather(c._fetch_access_token(), c._fetch_access_token())
+    assert [t for t, _ in results] == ["ya29.FRESH", "ya29.FRESH"]
+    assert len(calls) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_non_json_expired_session_still_gets_the_relogin(monkeypatch):
+    """An expired session answered with an HTML page must not skip the refresh."""
+    c = _make_client()
+    c._context = _SeqContext(["<html>sign in</html>", _TOKEN])
+    calls: list[object] = []
+
+    async def fake_refresh(ctx):
+        calls.append(ctx)
+        return True
+
+    monkeypatch.setattr("gflow_cli.api.client.refresh_flow_session", fake_refresh)
+    token, _exp = await c._fetch_access_token()
+    assert token == "ya29.FRESH"
+    assert len(calls) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_non_json_session_with_failed_relogin_raises(monkeypatch):
+    c = _make_client()
+    c._context = _SeqContext(["<html>sign in</html>"])
+
+    async def fake_refresh(ctx):
+        return False
+
+    monkeypatch.setattr("gflow_cli.api.client.refresh_flow_session", fake_refresh)
+    with pytest.raises(AisandboxAuthError, match="non-JSON"):
+        await c._fetch_access_token()

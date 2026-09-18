@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An expired Flow session is re-minted automatically when the Google account is still
+  signed in.** The labs.google NextAuth cookie expires on its own schedule; when it did,
+  REST calls failed with `AisandboxAuthError: no access_token in /fx/api/auth/session`
+  (exit 3) and the fix was clicking Flow's "Sign in" by hand — a click that needs no
+  input, because Google still holds the SSO session. `FlowApiClient` now performs that
+  round trip itself on the first missing token: NextAuth's own `csrf` + `signin/google`
+  API returns the Google OAuth URL, a temporary page follows it, and Google redirects
+  straight back with a fresh session. No DOM selectors, so it is locale-invariant. One
+  attempt per client, serialized across pooled pages; if Google asks for a password,
+  2FA, CAPTCHA or an account choice it stops at once and the old exit 3 stands.
+  Log event: `auth.flow_session_refresh` (`outcome=ok|challenge|timeout|failed`).
+  Verified live (zero credits) by `tests/e2e/test_auto_relogin_e2e.py`, which clears the
+  session cookie in a live context and gets a fresh `ya29.` token back.
+
 - **`gflow video r2v` from local `--ref` files runs on the migrated `flow.google.com`
   host** (#639). Each file is uploaded through the same editor toolbar path i2v already
   uses, so the app's own `maseQ` reply names the media id, and is then attached as an `@`

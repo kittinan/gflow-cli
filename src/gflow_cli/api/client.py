@@ -76,6 +76,7 @@ from gflow_cli.api.video import (
     parse_video_status,
 )
 from gflow_cli.api.video_extend import ExtendStarted
+from gflow_cli.auth.relogin import refresh_flow_session
 from gflow_cli.browser_manager import channel_for_profile
 from gflow_cli.config import BrowserEngine, Settings
 from gflow_cli.diagnostics import IncidentRecorder, run_retention, validated_incidents_root
@@ -346,6 +347,11 @@ class FlowApiClient:
     transport via `page.request`). Auth = whatever cookies the profile dir
     has from a prior `gflow auth login`.
     """
+
+    # One silent NextAuth re-login per client (see _refresh_flow_session_once).
+    # Defaults live on the class; the first write shadows them per instance.
+    _relogin_lock: asyncio.Lock | None = None
+    _relogin_result: bool | None = None
 
     def __init__(
         self,
@@ -1400,6 +1406,30 @@ class FlowApiClient:
         if ctx is None:
             msg = "access-token fetch needs an active browser context."
             raise AuthMissingError(msg)
+        try:
+            status, data = await self._read_session(ctx)
+        except AisandboxAuthError:
+            # An expired session may be answered with a non-JSON page, not `{}` —
+            # that is a missing token too, so it earns the same one refresh.
+            if not await self._refresh_flow_session_once(ctx):
+                raise
+            status, data = await self._read_session(ctx)
+        else:
+            if not data.get("access_token") and await self._refresh_flow_session_once(ctx):
+                status, data = await self._read_session(ctx)
+        token = data.get("access_token")
+        if not token:
+            raise AisandboxAuthError(
+                detail="no access_token in /fx/api/auth/session (session expired?)",
+                status=status,
+                instance=_make_instance(),
+                route="auth/session",
+            )
+        return str(token), _parse_iso_to_epoch(data.get("expires"))
+
+    @staticmethod
+    async def _read_session(ctx: BrowserContext) -> tuple[int, JsonObject]:
+        """GET the BFF session; ``(status, body)`` with a non-object body as ``{}``."""
         resp = await ctx.request.get(_SESSION_API_URL)
         try:
             parsed = json.loads(await resp.text())
@@ -1410,16 +1440,22 @@ class FlowApiClient:
                 instance=_make_instance(),
                 route="auth/session",
             ) from exc
-        data = cast("JsonObject", parsed) if isinstance(parsed, dict) else {}
-        token = data.get("access_token")
-        if not token:
-            raise AisandboxAuthError(
-                detail="no access_token in /fx/api/auth/session (session expired?)",
-                status=resp.status,
-                instance=_make_instance(),
-                route="auth/session",
-            )
-        return str(token), _parse_iso_to_epoch(data.get("expires"))
+        return resp.status, cast("JsonObject", parsed) if isinstance(parsed, dict) else {}
+
+    async def _refresh_flow_session_once(self, ctx: BrowserContext) -> bool:
+        """Re-mint an expired NextAuth session while Google SSO is alive — once per client.
+
+        Serialized: pooled pages that miss the token together share one sign-in. Later
+        misses reuse its result — they may re-read the session but never start a second
+        sign-in, so a profile Google wants a human for still ends in
+        ``AisandboxAuthError`` (exit 3) instead of looping. See ``auth/relogin.py``.
+        """
+        if self._relogin_lock is None:
+            self._relogin_lock = asyncio.Lock()
+        async with self._relogin_lock:
+            if self._relogin_result is None:
+                self._relogin_result = await refresh_flow_session(ctx)
+            return self._relogin_result
 
     async def _ensure_access_token(self) -> str:
         """Return a cached access token, (re)fetching when missing or near expiry."""

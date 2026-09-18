@@ -369,6 +369,24 @@ Run: gflow auth login --profile default
 
 Re-running `auth login` refreshes the cookies in place — no other state is lost.
 
+### Automatic Flow-session refresh
+
+Flow's app session (the labs.google NextAuth cookie `__Secure-next-auth.session-token`)
+expires independently of, and much sooner than, the Google session. When a command finds
+`/fx/api/auth/session` without an `access_token`, it re-mints the Flow session once on its
+own — the same round trip Flow's "Sign in" button performs, driven through NextAuth's API
+rather than the page, so no click and no locale-dependent selector is involved:
+
+1. `GET /fx/api/auth/csrf`, then `POST /fx/api/auth/signin/google` → Google OAuth URL.
+2. A temporary page follows it; with a live Google session Google redirects straight back,
+   and the callback sets a fresh session cookie.
+3. The session is re-read and the command continues.
+
+It runs at most once per command, and gives up immediately if Google shows a password,
+2FA, CAPTCHA or account-chooser page — then the `AuthExpiredError` above (exit `3`)
+applies and `gflow auth login` is still the fix. Watch for the `auth.flow_session_refresh`
+log event (`outcome=ok|challenge|timeout|failed`).
+
 ## Chromium downgrade guard
 
 Chrome profiles are not backward-compatible: opening a profile with an **older**
