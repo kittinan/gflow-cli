@@ -964,6 +964,9 @@ class UiAutomationTransport(VideoGenerationMixin):
         # mint exists to fix. Reachable from `gflow image batch`, which runs every
         # prompt through one FlowApiClient (image_batch.py::_run_sequential).
         self._served_migrated_host: bool = False
+        # #792: set when a migrated run FAILED, so the park that would otherwise
+        # run in a `finally` is deferred past FlowApiClient's incident capture.
+        self._deferred_park_pending: bool = False
         # Cross-process profile lease (D3). Held ONLY on the standalone-context
         # path (setup with page=None), where this transport owns the persistent
         # context. On the shared-page path the caller (FlowApiClient) owns both
@@ -1479,6 +1482,44 @@ class UiAutomationTransport(VideoGenerationMixin):
             )
             return False
 
+    async def _park_composer_page(self, page: Any, *, event: str) -> None:
+        """Park a composer page on about:blank. Best-effort; never raises.
+
+        The pooled page would otherwise stay on ``flow.google.com/project/<id>``:
+        the next request on this client would be routed by that URL instead of by
+        its own shape (an unmoved account's i2v -> exit 36, or a silently reused
+        project), and the next borrower would inherit a mounted composer.
+        """
+        try:
+            await page.goto("about:blank", wait_until="commit", timeout=5_000)
+        except Exception as exc:  # noqa: BLE001 - parking is best-effort
+            log.warning(event, error=str(exc)[:120])
+
+    async def park_deferred_page(self) -> None:
+        """Park a page whose park a FAILED migrated run deferred (#792).
+
+        The park used to sit in a bare ``finally``, so on the failure path it
+        navigated to about:blank BEFORE ``FlowApiClient._capture_incident`` staged
+        the bundle -- whose own contract is to capture "while the page is still
+        alive". Every migrated failure therefore shipped ``tag_counts.div = 0``, a
+        white screenshot and ``host_category = "other"`` next to a network journal
+        showing the app alive, which is unreadable as evidence.
+
+        Draining it at the START of the next run -- before the route decision reads
+        ``page.url`` -- is what makes deferring safe. Doing it at the client's
+        failure boundary was not enough: ``generate_images`` is retried inside
+        ``post_with_retry`` (``client.py``), so a retryable 5xx never reaches that
+        boundary and attempt 2 would re-enter a still-mounted composer. Draining
+        here holds the invariant at the only point that consumes it, and resets the
+        latch on every path (success, retry, or a later unrelated run).
+        """
+        if not self._deferred_park_pending:
+            return
+        self._deferred_park_pending = False
+        page = self._page
+        if page is not None:
+            await self._park_composer_page(page, event="migrated.deferred_page_park_failed")
+
     async def _settle_if_redirecting(self, page: Any) -> str | None:
         """Settle a navigation only on an account Flow actually redirects (#587).
 
@@ -1613,7 +1654,7 @@ class UiAutomationTransport(VideoGenerationMixin):
         # reported as a missing CTA. Consulted only HERE, after the sweep has already
         # run: an early bail would delete the DOM evidence that corrects a wrong
         # absence claim, which is how #739 shipped one (see the note below).
-        raise_if_known_landing(page, requested="the Flow gallery", at="labs.enter_editor")
+        await raise_if_known_landing(page, requested="the Flow gallery", at="labs.enter_editor")
 
         shot_path = await _capture_debug_screenshot(page, out_dir, "debug_new_project.png")
         # NO migrated-host branch here. #739 added one asserting that
@@ -1653,6 +1694,14 @@ class UiAutomationTransport(VideoGenerationMixin):
             MODE_SWITCH_TRIGGER_SELECTORS,
         )
         if trigger is None:
+            # Reached on the labs arm when --project was supplied: `_enter_editor` returns
+            # early there with no readiness gate, so the guard in its gallery arm never
+            # ran. Consulted here, where the caller is already about to raise, and BEFORE
+            # `_mode_switch_error` classifies -- that helper would otherwise answer
+            # "migrated host" or "selector drift" for an account that simply has no Flow.
+            await raise_if_known_landing(
+                page, requested="the Flow editor", at="labs.switch_to_image_mode"
+            )
             raise await VideoGenerationMixin._mode_switch_error(page, out_dir, media="image")
         await trigger.click()
         await page.wait_for_timeout(_jitter_ms(800))
@@ -1706,7 +1755,7 @@ class UiAutomationTransport(VideoGenerationMixin):
         # this sweep. It raises a bare RuntimeError, which `observability.py` SHA-256
         # hashes because it is not a GFlowError, so the operator is shown "Unexpected
         # error" with even the URL destroyed. Worse than the drift report #756 is about.
-        raise_if_known_landing(page, requested="the Flow editor", at="labs.locate_prompt_box")
+        await raise_if_known_landing(page, requested="the Flow editor", at="labs.locate_prompt_box")
 
         shot_path = await _capture_debug_screenshot(page, out_dir, "debug_prompt_not_found.png")
         msg = f"Prompt input not found in Flow UI. URL: {page.url}.{screenshot_clause(shot_path)}"
@@ -3079,6 +3128,14 @@ class UiAutomationTransport(VideoGenerationMixin):
         from gflow_cli.api.transports.migrated_composer import run_images  # noqa: PLC0415
         from gflow_cli.config import get_settings  # noqa: PLC0415
 
+        # #792: a FAILED migrated run leaves this page on the project URL on
+        # purpose, so the incident bundle is captured from a live page instead of
+        # about:blank. Drain that deferred park HERE — before the route decision
+        # reads page.url, and before anything re-enters a still-mounted composer.
+        # This is also the retry path: generate_images runs inside
+        # post_with_retry, so a retryable 5xx never reaches the client's failure
+        # boundary and attempt 2 would otherwise resume on a dirty composer.
+        await self.park_deferred_page()
         flow_host = get_settings().flow_host
         route = migrated_route(page.url, flow_host)
         if route == "labs":
@@ -3093,17 +3150,29 @@ class UiAutomationTransport(VideoGenerationMixin):
             raise_if_migrated(page, at="image_flow_host_kill_switch")
         if route == "migrated":
             try:
-                return await run_images(page, request, project_id=project_id)
-            finally:
-                # Park off the project so the next borrower of this page does not
-                # inherit a mounted composer. The URL is therefore NOT a reliable
-                # record of which host served us — `_served_migrated_host` above
-                # is, and `uses_page_owned_image_recaptcha` reads that latch.
-                try:
-                    await page.goto("about:blank", wait_until="commit", timeout=5_000)
-                    await self._settle_if_redirecting(page)
-                except Exception as exc:  # noqa: BLE001 - parking is best-effort
-                    log.warning("migrated.image_page_park_failed", error=str(exc)[:120])
+                result = await run_images(page, request, project_id=project_id)
+            except Exception:
+                # #792: do NOT park here. FlowApiClient stages the incident bundle
+                # from THIS page at its failure boundary, and parking first hands
+                # the triager about:blank. `park_deferred_page` runs it after.
+                self._deferred_park_pending = True
+                raise
+            except BaseException:
+                # Cancellation/KeyboardInterrupt: no bundle is staged for these, so
+                # nothing is waiting on the page. Attempt the park inline -- but a
+                # re-delivered cancel can pre-empt it at the `goto` await, and
+                # `except Exception` cannot catch that. The next run's drain is the
+                # guarantee; this is the courtesy.
+                self._deferred_park_pending = True
+                await self._park_composer_page(page, event="migrated.image_page_park_failed")
+                raise
+            # Park off the project so the next borrower of this page does not
+            # inherit a mounted composer (on the FAILURE path this is deferred to
+            # the next run -- see park_deferred_page, #792). The URL is NOT a reliable
+            # record of which host served us — `_served_migrated_host` above is,
+            # and `uses_page_owned_image_recaptcha` reads that latch.
+            await self._park_composer_page(page, event="migrated.image_page_park_failed")
+            return result
 
         # Determine the arm this command REQUIRES: explicit --ui-mode / env, or
         # inferred — agent instructions (-i) are an agentic-only surface, so they

@@ -186,6 +186,67 @@ async def test_worker_process_t2i_batch(temp_db: DataStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_agent_supplied_project_name_becomes_the_created_project_title(
+    temp_db: DataStore,
+) -> None:
+    """#628: the daemon must read the key the MCP tool actually writes.
+
+    ``mcp/tools.py`` writes ``payload["project_name"]`` and documents the parameter
+    as "human-readable project title to use when creating a fresh Flow project".
+    The daemon read ``payload["project_title"]`` — a key nothing in the codebase has
+    ever written — so the name was dropped on every call and each fresh project was
+    created as the hardcoded fallback instead.
+    """
+    repo = QueueRepository(temp_db)
+    task = repo.enqueue_task(
+        task_id="task-project-name",
+        profile_name="default",
+        task_type="t2i",
+        payload={"prompt": "a lighthouse", "count": 2, "project_name": "Client pitch deck"},
+    )
+
+    worker = FlowWorker("default", str(temp_db.path))
+    fake_client = FakeFlowApiClient()
+    fake_client.create_project.return_value = MagicMock(
+        project_id="project-abc", title="Client pitch deck"
+    )
+    fake_client.generate_images_batch.return_value = [FakeGeneratedImage(media_name="media-1")]
+
+    with patch("gflow_cli.worker.daemon.FlowApiClient", return_value=fake_client):
+        await worker.process_task(task)
+
+    fake_client.create_project.assert_awaited_once_with(title="Client pitch deck")
+    worker.close()
+
+
+@pytest.mark.asyncio
+async def test_an_agent_supplied_project_name_titles_the_video_project_too(
+    temp_db: DataStore,
+) -> None:
+    """#864: the MCP video tool writes ``project_name`` exactly as the image tool does,
+    and ``gflow video t2v --project-name`` honours it — the video branch read nothing."""
+    repo = QueueRepository(temp_db)
+    task = repo.enqueue_task(
+        task_id="task-t2v-project-name",
+        profile_name="default",
+        task_type="t2v",
+        payload={"prompt": "a crane", "aspect": "16:9", "project_name": "Client reel"},
+    )
+
+    worker = FlowWorker("default", str(temp_db.path))
+    fake_client = FakeFlowApiClient()
+    fake_client.create_project.return_value = MagicMock(project_id="project-v", title="Client reel")
+    fake_client.generate_video.return_value = _completed_video_result("media-v")
+
+    with patch("gflow_cli.worker.daemon.FlowApiClient", return_value=fake_client):
+        await worker.process_task(task)
+
+    fake_client.create_project.assert_awaited_once_with(title="Client reel")
+    assert fake_client.generate_video.await_args.kwargs["project_id"] == "project-v"
+    worker.close()
+
+
+@pytest.mark.asyncio
 async def test_worker_process_t2v(temp_db: DataStore) -> None:
     repo = QueueRepository(temp_db)
     task = repo.enqueue_task(
@@ -790,6 +851,50 @@ async def test_migrated_host_error_crosses_the_queued_path(temp_db: DataStore) -
     assert updated.error["exit_code"] == 36
     assert updated.error["retryable"] is False
     assert updated.error["retryable"] is is_retryable(exc)
+    worker.close()
+
+
+async def test_the_no_flow_access_verdict_crosses_the_queued_path(temp_db: DataStore) -> None:
+    """The MCP twin of exit 39, run rather than reasoned about (AGENTS.md § second law).
+
+    ``daemon.py`` names no error class: it resolves an exit code by walking
+    ``EXIT_CODE_MAP`` and taking the first ``isinstance`` hit, with a fallback of **1**.
+    A class registered in the map but shadowed by a broader earlier entry would reach an
+    agent as a generic failure with no remediation, and every CLI-side test would still
+    pass. So this drives the real ``process_task`` and reads the persisted row back.
+
+    ``remediation_hint`` is asserted because it is the only part an agent can act on: a
+    correct exit code attached to "run auth login" would still send it round the loop.
+    """
+    from gflow_cli.errors import FlowAccessUnavailableError, is_retryable
+
+    repo = QueueRepository(temp_db)
+    task = repo.enqueue_task(
+        task_id="task-t2i-no-flow-access",
+        profile_name="default",
+        task_type="t2i",
+        payload={"prompt": "scenic landscape"},
+    )
+
+    worker = FlowWorker("default", str(temp_db.path))
+    fake_client = FakeFlowApiClient()
+    fake_client.create_project.return_value = MagicMock(project_id="project-abc", title="T")
+    exc = FlowAccessUnavailableError(detail="Flow served its unavailable screen")
+    fake_client.generate_image.side_effect = exc
+
+    with patch("gflow_cli.worker.daemon.FlowApiClient", return_value=fake_client):
+        await worker.process_task(task)
+
+    updated = repo.get_task("task-t2i-no-flow-access")
+    assert updated is not None
+    assert updated.status == "failed"
+    assert updated.error is not None
+    assert updated.error["exit_code"] == 39, "shadowed by an earlier EXIT_CODE_MAP entry"
+    assert updated.error["retryable"] is False
+    assert updated.error["retryable"] is is_retryable(exc)
+    hint = str(updated.error.get("remediation_hint", "")).casefold()
+    assert "subscription" in hint or "google ai" in hint, hint
+    assert "auth login" not in hint, "an agent told to re-login would loop forever"
     worker.close()
 
 

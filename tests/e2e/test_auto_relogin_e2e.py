@@ -31,6 +31,9 @@ async def test_expired_nextauth_session_is_reminted_silently(e2e_profile_dir: Pa
         await ctx.clear_cookies(name="__Secure-next-auth.session-token", domain="labs.google")
         client._access_token = None
         client._access_token_exp = 0.0
+        # A profile whose cached deadline has passed is already revived at client start,
+        # which spends the one attempt. Reset it so this test measures the reactive path.
+        client._relogin_result = None
 
         _status, before = await client._read_session(ctx)
         assert not before.get("access_token"), "cookie clear did not expire the session"

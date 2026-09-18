@@ -132,6 +132,17 @@ _MCP_EXEMPT: dict[str, str] = {
         "informed consent on the user's behalf (the #481 shape). Note it is FREE, "
         "so cost is NOT the reason — irreversibility is"
     ),
+    # Deferred with a named shape, not a policy exclusion (#861). The consumer that
+    # filed #861 IS an agent, so "agents do not need it" would be false. What is true is
+    # that documentation is not a tool call: MCP models documents as *resources*, and
+    # wrapping `docs --search` as a tool would hand an agent a second, worse way to read
+    # the same prose its tool descriptions already carry. The upgrade path is a resources
+    # provider over `gflow_cli.docs_catalog` — which is why every decision in that module
+    # is Click-free and returns data.
+    "docs": (
+        "read-only local documentation; the MCP shape for prose is a resources "
+        "provider over docs_catalog, not a tool — deferred, not excluded (#861)"
+    ),
     "data errors export": "local catalog maintenance — deliberately CLI-only (#345)",
     "data errors prune": "destructive local retention — deliberately CLI-only (#345)",
     "data list errors": "local catalog maintenance — not yet ported",

@@ -1008,12 +1008,24 @@ async def _run_chain(
     """
     from pathlib import Path as _Path
 
-    from gflow_cli import chain as chain_mod
-    from gflow_cli.api.video import Aspect
-    from gflow_cli.chain import reject_unusable_links
-    from gflow_cli.chain_manifest import parse_chain_manifest
-    from gflow_cli.data.chain_repo import ChainLinkRecorder
-    from gflow_cli.errors import ChainManifestError
+    from gflow_cli.errors import ChainManifestError, FrameExtractionError
+
+    # `gflow_cli.chain` pulls in `gflow_cli.media`, which imports BOTH optional
+    # `[chain]` dependencies (av, pillow) at module level. Guarding here — the
+    # first statement of the command, ahead of the manifest read, the --dry-run
+    # short-circuit and the cost prompt — turns a missing extra into a typed
+    # exit 20 with an install hint instead of the generic "file a bug" exit 1
+    # that `gflow-cli[chain]==0.74.0` shipped (#813).
+    try:
+        from gflow_cli import chain as chain_mod
+        from gflow_cli.api.video import Aspect
+        from gflow_cli.chain import reject_unusable_links
+        from gflow_cli.chain_manifest import parse_chain_manifest
+        from gflow_cli.data.chain_repo import ChainLinkRecorder
+    except ImportError as exc:
+        raise FrameExtractionError(
+            detail=f"`gflow video chain` needs the optional [chain] dependencies: {exc}",
+        ) from exc
 
     resolved_model = _resolve_chain_model(model)
     aspect_enum = Aspect.from_cli(aspect)
@@ -1680,7 +1692,7 @@ def _reject_avatar_model_without_references(model: str | None) -> None:
         "through Flow's own Add Media dialog, which is what makes Flow attach "
         "`referenceLikenesses` to the request.\n\n"
         "AVAILABILITY: Flow gates Avatar on identity verification AND region. "
-        "gflow checks eligibility before generating and aborts with exit 39 "
+        "gflow checks eligibility before generating and aborts with exit 40 "
         "(no credits spent) when the account cannot use it. Confirm the Avatar "
         "tab works in Flow's web UI first if you are unsure.\n\n"
         "\b\n"

@@ -11,8 +11,9 @@ Wire shape discovered in docs/CHARACTER_RECON.md (issue #145).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -262,3 +263,75 @@ def parse_characters(project_initial_data: dict[str, Any]) -> list[Character]:
     raw_entities: list[dict[str, Any]] = raw_contents.get("entities") or []
     result = (_parse_character_entity(e) for e in raw_entities)
     return [c for c in result if c is not None]
+
+
+_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
+
+
+def _uuids_in(node: Any) -> list[str]:
+    if isinstance(node, str):
+        return [node] if _UUID_RE.match(node) else []
+    if isinstance(node, list):
+        return [u for child in cast("list[Any]", node) for u in _uuids_in(child)]
+    return []
+
+
+def _migrated_character_row(row: list[Any], project_id: str) -> Character | None:
+    if len(row) < 5 or row[0] != project_id:
+        return None
+    entity_id, info = row[1], row[3]
+    if not (isinstance(entity_id, str) and _UUID_RE.match(entity_id)):
+        return None
+    if not isinstance(info, list) or len(cast("list[Any]", info)) < 2:
+        return None
+    info_l = cast("list[Any]", info)
+    name = info_l[1]
+    if not isinstance(name, str) or not name:
+        return None
+    refs: Any = info_l[2] if len(info_l) > 2 else None
+    refs_l = cast("list[Any]", refs) if isinstance(refs, list) else []
+    # The refs block ends with the free-text personality: [face, body, personality].
+    personality = next((x for x in refs_l if isinstance(x, str) and not _UUID_RE.match(x)), None)
+    thumb = row[4] if isinstance(row[4], str) and _UUID_RE.match(row[4]) else None
+    return Character(
+        entity_id=entity_id,
+        display_name=name,
+        project_id=project_id,
+        workflow_ids=tuple(_uuids_in(refs)),
+        voice=None,
+        personality=personality,
+        thumbnail_media_id=thumb,
+    )
+
+
+def parse_migrated_characters(payload: Any, project_id: str) -> list[Character]:
+    """Extract characters from the migrated host's ``Zzl0ze`` project payload.
+
+    flow.google.com loads a project over batchexecute rpcid ``Zzl0ze``; one section holds
+    a row per character (measured 2026-09-18)::
+
+        [project_id, entity_id, null, [1, name, [[[wf]...], [[wf]...], personality], true],
+         thumbnail_media_id, [w, h], created, updated]
+
+    Rows are located by that SHAPE — project id first, an entity uuid second, a
+    ``[_, name, …]`` info block fourth — anywhere in the payload, never by section index,
+    so a wrapper change does not blind the parser. Workflow, generation, voice and avatar
+    rows never start with the project id and so never match. Voice is not carried here.
+    """
+    found: list[Character] = []
+    seen: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, list):
+            return
+        items = cast("list[Any]", node)
+        char = _migrated_character_row(items, project_id)
+        if char is not None and char.entity_id not in seen:
+            seen.add(char.entity_id)
+            found.append(char)
+            return
+        for child in items:
+            walk(child)
+
+    walk(payload)
+    return found

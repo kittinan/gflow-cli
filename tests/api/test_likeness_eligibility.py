@@ -153,7 +153,11 @@ class TestEligibilityGatesGeneration:
         transport.generate_video = AsyncMock(return_value="ok")
         client.transport = transport
 
-        await client.generate_video(req=GenerateVideoRequest(prompt="p"), download=False)
+        # An explicit project: since #864 a missing one is created first, which is not
+        # what this guard is about.
+        await client.generate_video(
+            req=GenerateVideoRequest(prompt="p"), project_id="p1", download=False
+        )
 
         get_json.assert_not_awaited()
 

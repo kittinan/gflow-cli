@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import os
 import re
@@ -42,7 +43,12 @@ from gflow_cli.api._engine import (
     run_teardown_step,
 )
 from gflow_cli.api._retry import parse_retry_after, post_with_retry
-from gflow_cli.api.character import Character, CharacterImageRequest, parse_characters
+from gflow_cli.api.character import (
+    Character,
+    CharacterImageRequest,
+    parse_characters,
+    parse_migrated_characters,
+)
 from gflow_cli.api.dto import (
     AssetInfo,
     CreditsInfo,
@@ -1927,12 +1933,42 @@ class FlowApiClient:
     async def create_project(self, title: str | None = None) -> ProjectInfo:
         """Bootstrap a fresh Flow project. Title defaults to a timestamp.
 
-        Maps to `POST .../trpc/project.createProject`.
+        Maps to `POST .../trpc/project.createProject`, and to flow.google.com's projects
+        page when that route refuses (#864, see :meth:`_labs_project_route_refused`).
         """
         title = title or _default_project_title()
-        body = {"json": {"projectTitle": title, "toolName": "PINHOLE"}}
-        data = await self._post_json(routes.CREATE_PROJECT, body, content_type=_APPLICATION_JSON)
-        return ProjectInfo.from_create_response(data)
+        if self.settings.flow_host != "flow.google.com":
+            body = {"json": {"projectTitle": title, "toolName": "PINHOLE"}}
+            try:
+                data = await self._post_json(
+                    routes.CREATE_PROJECT, body, content_type=_APPLICATION_JSON
+                )
+                return ProjectInfo.from_create_response(data)
+            except (AuthExpiredError, WireFormatError) as exc:
+                if not self._labs_project_route_refused(exc):
+                    raise
+        from gflow_cli.api.transports import migrated_composer  # noqa: PLC0415
+
+        page = await self._checkout_page()
+        try:
+            return await migrated_composer.create_project(page, title)
+        finally:
+            self._checkin_page(page)
+
+    def _labs_project_route_refused(self, exc: AuthExpiredError | WireFormatError) -> bool:
+        """Is this the labs project route's measured refusal, worth trying flow.google.com?
+
+        Measured 2026-09-17 on four profiles, 12/12: 404 "Flow RPCs have been deprecated
+        and disabled" for a session holding a labs token, 401 for one without. Keyed on
+        that observed answer, never on which host an account is served — and only under
+        ``flow_host=auto``, so an operator who pinned labs.google keeps the labs error.
+        A 401 from a genuinely signed-out profile goes on to fail on flow.google.com too,
+        where the landing diagnosis names what the browser actually saw.
+        """
+        refused = self.settings.flow_host == "auto" and exc.status in (401, 404)
+        if refused:
+            logger.info("project.labs_route_refused", status=exc.status, issue_ref="#864")
+        return refused
 
     async def get_credits(self) -> CreditsInfo:
         """Return the authenticated profile's current Flow credit balance."""
@@ -1956,10 +1992,26 @@ class FlowApiClient:
     async def rename_project(self, project_id: str, new_title: str) -> JsonObject:
         """Rename an existing Flow project.
 
-        Maps to `POST .../trpc/project.renameProject`.
+        Maps to `POST .../trpc/project.renameProject`, and to the project's header title
+        on flow.google.com when that route refuses (#864). Returns ``{}`` there.
         """
-        body = {"json": {"projectId": project_id, "projectTitle": new_title}}
-        return await self._post_json(routes.RENAME_PROJECT, body, content_type=_APPLICATION_JSON)
+        if self.settings.flow_host != "flow.google.com":
+            body = {"json": {"projectId": project_id, "projectTitle": new_title}}
+            try:
+                return await self._post_json(
+                    routes.RENAME_PROJECT, body, content_type=_APPLICATION_JSON
+                )
+            except (AuthExpiredError, WireFormatError) as exc:
+                if not self._labs_project_route_refused(exc):
+                    raise
+        from gflow_cli.api.transports import migrated_composer  # noqa: PLC0415
+
+        page = await self._checkout_page()
+        try:
+            await migrated_composer.rename_project(page, project_id, new_title)
+        finally:
+            self._checkin_page(page)
+        return {}
 
     async def patch_agent_info(
         self,
@@ -3009,6 +3061,14 @@ class FlowApiClient:
         # Avatar pre-flight (free Bearer read) before anything that could spend.
         if req.attaches_likeness:
             await self._require_likeness_eligibility(surface="video")
+        if project_id is None:
+            # #864: as generate_image does. Leaving it to the transport meant the labs
+            # gallery's "new project" click, which cannot reach flow.google.com's
+            # projects page; create_project reaches both hosts.
+            try:
+                project_id = (await self.create_project()).project_id
+            except Exception as e:
+                await self._raise_with_incident(e, phase="video_generation")
 
         wrapped_on_started = on_started
         if on_checkpoint is not None:
@@ -3105,10 +3165,62 @@ class FlowApiClient:
         """
         trpc_input = json.dumps({"json": {"projectId": project_id}}, separators=(",", ":"))
         url = f"{routes.PROJECT_INITIAL_DATA_URL}?input={quote(trpc_input, safe='')}"
-        data = await self._get_json(url, route_name="projectInitialData")
+        try:
+            data = await self._get_json(url, route_name="projectInitialData")
+        except WireFormatError as exc:
+            # Measured 2026-09-18: on a migrated account the labs route answers 404
+            # "Flow RPCs have been deprecated and disabled" — the retirement that took
+            # createProject (#864). The migrated app loads the same facts on project
+            # open; read them from there. Anything else is a real failure, not masked.
+            if exc.status != 404:
+                raise
+            payload = await self._fetch_migrated_project_data(project_id)
+            chars = parse_migrated_characters(payload, project_id)
+            logger.info("character.list_fetched_migrated", project_id=project_id, count=len(chars))
+            return chars
         chars = parse_characters(_unwrap_trpc(data))
         logger.debug("character.list_fetched", project_id=project_id, count=len(chars))
         return chars
+
+    async def _fetch_migrated_project_data(self, project_id: str) -> Any:
+        """The flow.google.com app's own ``Zzl0ze`` payload for *project_id*.
+
+        The app requests it on every project open, so a temporary page opens the project
+        and keeps that reply — no request of ours to forge, no ``at`` token to scrape.
+        A temporary page (not a pooled one) because callers may already hold the pool's
+        only page; FREE — nothing is submitted. ~5-10 s.
+        """
+        from gflow_cli.api.transports.batchexecute import parse_frames
+        from gflow_cli.api.transports.migrated_composer import MIGRATED_PROJECT_URL
+
+        if not is_media_uuid(project_id):
+            msg = f"Invalid project_id: {project_id!r}"
+            raise ValueError(msg)
+        ctx = self._context
+        if ctx is None:
+            msg = "FlowApiClient not entered — use `async with`"
+            raise RuntimeError(msg)
+        page = await ctx.new_page()
+        try:
+            async with page.expect_response(
+                lambda r: "rpcids=Zzl0ze" in r.url, timeout=45_000
+            ) as info:
+                await page.goto(
+                    MIGRATED_PROJECT_URL.format(project_id=project_id),
+                    wait_until="domcontentloaded",
+                    timeout=45_000,
+                )
+            body = await (await info.value).text()
+        finally:
+            with contextlib.suppress(Exception):
+                await page.close()
+        for rpcid, payload in parse_frames(body):
+            if rpcid == "Zzl0ze":
+                return payload
+        raise WireFormatError(
+            detail="the flow.google.com project load carried no Zzl0ze frame",
+            route="Zzl0ze",
+        )
 
     async def fetch_project_listing(self, project_id: str) -> JsonObject:
         """Fetch the raw ``flow.projectInitialData`` listing for *project_id*.

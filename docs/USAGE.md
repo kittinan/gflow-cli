@@ -10,6 +10,10 @@ CLI command reference. For environment variables see [CONFIGURATION](CONFIGURATI
 gflow [OPTIONS] COMMAND [ARGS]...
 
 Commands:
+  docs      Browse gflow's own documentation (offline, read-only).
+    (no args)                   List every topic and what it covers.
+    TOPIC                       Print one page as raw Markdown (pipes cleanly).
+    --search TERM               Matching lines, with docs/FILE.md:LINE positions.
   auth      Manage Google sessions for Flow.
     (no args)                   Show profile list, or trigger first login.
     login                       One-time interactive sign-in.
@@ -75,6 +79,47 @@ emit a single parseable object on stdout instead of Rich tables. See
 
 Note: `--profile NAME` is **per-subcommand**, not global — pass it after the subcommand name (e.g. `gflow image t2i "..." --profile experiments`, not `gflow --profile experiments image t2i ...`).
 
+## `gflow docs`
+
+The documentation, from the terminal. Read-only, offline, no account, no credits — the
+pages ship inside the package, so this works on a machine that has never seen this
+repository.
+
+```bash
+gflow docs                          # every topic, with what it covers
+gflow docs usage                    # print one page (raw Markdown — pipe it)
+gflow docs --search "r2v duration"  # find the line that answers a question
+```
+
+| Flag | Effect |
+|---|---|
+| `--search TERM` | Every line mentioning TERM, with `docs/FILE.md:LINE` next to it. Whitespace splits the query into terms that must **all** appear on the line |
+| `--json` | Machine-readable, on all three forms |
+
+**A topic name is whatever you would type**: the slug (`user-guide`), the file name
+(`USER_GUIDE.md`), either case, or any unambiguous prefix (`conf` → `configuration`). An
+ambiguous prefix lists the candidates; an unknown name is matched against the topic
+list with `difflib`, so a typo (`usge`) is still offered `usage`.
+
+**Use two words when one is common.** `--search duration` matches well over a hundred
+lines; the table header carries the total, shows the first 20 and says how many it held
+back. `--search "r2v duration"` narrows that to a handful with the host-specific rule
+at the top.
+
+Curated answers rank first: the `**"How do I …?"** →` rows in
+[INDEX](INDEX.md#topic-shortcuts) were each written to *be* an answer, so they come above
+raw body-text matches for the same term.
+
+Piping works — the page is emitted as its own Markdown, not as rendered boxes:
+
+```bash
+gflow docs configuration | grep GFLOW_CLI_STORAGE_URI
+gflow docs --search "exit code" --json | jq -r '.matches[].path'
+```
+
+There is deliberately **no MCP twin** — see the note at the top of
+`src/gflow_cli/cli_docs.py`.
+
 ## `gflow auth`
 
 See [AUTHENTICATION § Commands](AUTHENTICATION.md#commands).
@@ -84,6 +129,12 @@ See [AUTHENTICATION § Commands](AUTHENTICATION.md#commands).
 Read the current Google Flow balance through an existing authenticated profile. This is a
 read-only request: it does not generate media or spend credits. The displayed balance funds Veo
 video generation; image generation uses separate per-model daily quotas.
+
+> **Unavailable where Flow serves `flow.google.com`.** The balance comes from a `labs.google` endpoint. On an
+> account Google has moved to `flow.google.com`, the labs session answers `200` with no access
+> token, so the command fails with "the labs.google session returned no access token". That is
+> expected on that cohort — the session is fine and re-authenticating will not help; generation
+> still works. Open, tracked in [#795](https://github.com/ffroliva/gflow-cli/issues/795).
 
 ```text
 gflow credits user [--profile NAME] [--json]
@@ -187,11 +238,11 @@ Generate 1–4 images from one text prompt, or run a shell-friendly batch of 1�
 prompts through one Flow session/project.
 
 > **Migrated `flow.google.com` accounts (#639):** T2I is supported with Nano Banana 2
-> (`nano2`) and Nano Banana Pro (`nano-pro`), the four aspects measured there (`16:9`,
-> `4:3`, `1:1`, `9:16`), and count 1–4. **`--project <id>` is required** — a fresh project
-> can only be created through the labs gallery, so without it the run exits 11. The
+> (`nano2`) and Nano Banana Pro (`nano-pro`), all five aspects (`16:9`,
+> `4:3`, `1:1`, `3:4`, `9:16`), and count 1–4. Without `--project`, gflow creates a fresh project
+> there first ([#864](https://github.com/ffroliva/gflow-cli/issues/864)). The
 > migrated page owns its reCAPTCHA + `ogiZ0b` submit. Imagen 4, Agent instructions,
-> character/entity references, `3:4` and `image batch` remain unavailable on that host and
+> character/entity references and `image batch` remain unavailable on that host and
 > fail before submit.
 
 ```text
@@ -334,9 +385,9 @@ A 4-image run with `--out ./logos/` produces:
 Generate 1–4 images by blending a text prompt with one or more reference images. Same flag set as `t2i`, plus a required `--ref` (repeatable).
 
 > **Migrated `flow.google.com` accounts (#639):** local-file `--ref` values are supported
-> and each uploaded media id is verified in the outgoing `ogiZ0b` body. **`--project <id>`
-> is required here** (exit 11 without it). UUID refs, `@Name` / `--reference-entity`, Agent
-> instructions, Imagen 4 and the `3:4` aspect remain unavailable on that host and fail
+> and each uploaded media id is verified in the outgoing `ogiZ0b` body. Without `--project`,
+> gflow creates one there first (#864). UUID refs, `@Name` / `--reference-entity`, Agent
+> instructions and Imagen 4 remain unavailable on that host and fail
 > before submit rather than silently degrading to T2I.
 
 ```text
@@ -638,12 +689,14 @@ Options:
 
 > **Two Flow frontends (#639).** Under the default `GFLOW_CLI_FLOW_HOST=auto`, `t2v` with
 > `--project <id>` runs on Flow's migrated `flow.google.com` host on every account; without
-> `--project` an unmoved account falls back to the labs driver, and a moved account exits 11
-> (`--project` is required there — project creation is not ported). `i2v` with a local
-> `--initial-frame` and no `--end-frame` runs there too (see [`gflow video i2v`](#gflow-video-i2v)),
-> as does `r2v` from local `--ref` files (see [`gflow video r2v`](#gflow-video-r2v));
-> an end frame, a frame given by UUID or `@Name`, references given by `@Name` or
-> `--reference-entity`. `image t2i` and local-file `image i2i` also run on a moved
+> `--project`, gflow first creates a project — through labs.google where that route answers,
+> otherwise on flow.google.com ([#864](https://github.com/ffroliva/gflow-cli/issues/864)) —
+> and the run then routes exactly as if you had passed it. `i2v` with a local
+> `--initial-frame` runs there too — **including with a local `--end-frame`**
+> (start+end interpolation, #639; see [`gflow video i2v`](#gflow-video-i2v)) — as does
+> `r2v` from local `--ref` files (see [`gflow video r2v`](#gflow-video-r2v)). An end frame
+> or start frame given by UUID or `@Name`, and references given by `@Name` or
+> `--reference-entity`, are not ported to the migrated composer yet. `image t2i` and local-file `image i2i` also run on a moved
 > account; UUID/entity/instruction/Imagen-4 image forms still exit 36. `flow.google.com` forces the migrated composer,
 > `labs.google` switches it off — see [CONFIGURATION § GFLOW_CLI_FLOW_HOST](CONFIGURATION.md#gflow_cli_flow_host).
 
@@ -673,11 +726,18 @@ the editor's frame slot via the media dialog, then Flow fires
 > `GFLOW_CLI_FLOW_HOST=flow.google.com` — only a **local** `--initial-frame` is served, with
 > `--project <id>`: gflow uploads the file through the editor's own Upload entry (it stays in
 > the project's library like any upload — a second run uploads it again), finds it in the
-> Start-frame picker under its file name, and refuses to submit unless the app's own
+> Start-frame picker under the name it was uploaded with (see below), and refuses
+> to submit unless the app's own
 > submit body carries that upload's media id with an image-to-video model key (exit 7
 > otherwise: the labs #125 shape, where an unbound frame silently goes out as text-to-video).
-> `--end-frame`, a UUID or `@Name` frame exit 36 there; an unmoved account keeps the labs
-> driver for those.
+> A UUID or `@Name` frame exits 36 there; a local `--end-frame` is ported (#639). An
+> account served labs.google keeps the labs driver for the unported forms.
+>
+> What lands in the library is a **run-unique copy** — `hero.png` uploads as
+> `hero-a1b2c3d4.png` (#792). The picker is searched by display name, so identical names
+> from earlier runs used to be indistinguishable and the search could bind a stale one;
+> the random tag makes the match exact by construction. Expect the tagged names when you
+> browse the project's library on flow.google.com.
 
 ```text
 gflow video i2v --initial-frame INITIAL [--end-frame LAST] PROMPT [--model] [--duration] [--count] [--aspect] [--ui-mode] [...]
@@ -739,7 +799,9 @@ gflow video r2v "blend these worlds" --ref a.png --ref b.png --ref c.png --model
 
 > **On Flow's migrated `flow.google.com` host (#639)** — a moved account, or
 > `GFLOW_CLI_FLOW_HOST=flow.google.com` — only **local `--ref` files** are served, with
-> `--project <id>`. Each file is uploaded through the editor's own Upload entry (the same
+> `--project <id>`. Each file is uploaded through the editor's own Upload entry under a
+> **run-unique** name — `hero.png` uploads as `hero-a1b2c3d4.png` (#792), so re-using the
+> same reference across runs cannot bind an earlier copy — (the same
 > path i2v uses, so it stays in the project's library like any upload) and then attached as
 > an `@` **mention** in the prompt — references are not a chip slot on this host. A run
 > whose references have not all attached is refused **before** submit (exit 32), and the
@@ -752,9 +814,17 @@ gflow video r2v "blend these worlds" --ref a.png --ref b.png --ref c.png --model
 > `--reference-entity-name <name>`. The name is not optional on this host: Flow's picker
 > searches by display name and offers no id to anchor on, so without one there is nothing
 > to type and the request is refused (exit 36) rather than submitted without the
-> character. The chip the picker commits is then read back and checked to carry
-> `data-reference-type="entity"` with the id you asked for — Flow lists characters and
-> media under one search and does not rank them, so a file sharing the name can win.
+> character. Flow lists characters and media under one search and does not rank them —
+> `@tun` once offered fourteen `tun_portrait-*.jpg` files before the character — so gflow
+> narrows the picker to its **Characters** tab before searching, picks the option whose
+> name matches exactly, and then reads the chip back to check it carries
+> `data-reference-type="entity"` with the id you asked for.
+>
+> **`@<name>` in the prompt works too** — `"@Tun walks in…"` resolves to the project's
+> character and attaches it exactly as the two flags would. The character catalog behind
+> it is read from the flow.google.com project load (rpcid `Zzl0ze`), because the labs
+> route it used (`projectInitialData`) now answers 404 on migrated accounts; that adds a
+> few seconds to a run whose prompt carries an `@`.
 >
 > **`--duration 4` and `--duration 6` are refused on this path (exit 11).** At those two
 > lengths the host does not refuse — it drops the references, types their file *names*
@@ -788,7 +858,7 @@ gflow video r2v "blend these worlds" --ref a.png --ref b.png --ref c.png --model
 > there is nothing to drop.
 >
 > If your account has never recorded an avatar, the Avatars tab shows its onboarding
-> introduction instead of one and gflow fails with exit 39 — Flow's free eligibility check
+> introduction instead of one and gflow fails with exit 40 — Flow's free eligibility check
 > reports whether you *may* use an avatar, not whether you *have* one.
 
 `--avatar` attaches your Flow Avatar (likeness) **alongside** the reference
@@ -844,17 +914,17 @@ developed against. gflow makes no claim that your account can use it.
 What gflow does about it:
 
 1. **Pre-flight.** Before generating, gflow calls the free eligibility endpoint.
-   A definitive "not eligible" aborts with **exit 39**
+   A definitive "not eligible" aborts with **exit 40**
    (`AvatarUnavailableError`) — no reCAPTCHA token minted, no credits spent.
 2. **Media-dialog gate.** If the pre-flight answer is inconclusive (a network
    blip, an unrecognised response shape), gflow opens Flow's Add Media dialog
    and looks for the Avatar tab. Other tabs present but no Avatar tab is also
-   exit 39, still **before** the prompt is submitted.
+   exit 40, still **before** the prompt is submitted.
 3. **No silent degradation.** gflow never falls back to a plain t2i/t2v
    generation without the likeness. If the Avatar cannot be attached, nothing is
    submitted.
 
-If you hit exit 39, confirm the Avatar tab works in Flow's own web UI at
+If you hit exit 40, confirm the Avatar tab works in Flow's own web UI at
 <https://labs.google/fx/tools/flow> first. If it does not, use
 [`gflow character`](#gflow-character) for a reusable subject or `--ref` for a
 one-off reference image instead; re-running will not change a region verdict.
@@ -1020,8 +1090,12 @@ previous clip**, giving visual continuity with no server-side stitching.
 > `-y` / `--yes`.
 
 > **Requires the `chain` extra.** The last-frame extractor decodes the previous
-> clip with [PyAV](https://pyav.org/) (no system ffmpeg needed). Install it
-> with:
+> clip with [PyAV](https://pyav.org/) (no system ffmpeg needed) and writes the
+> seed JPEG with [Pillow](https://python-pillow.org/); the extra carries both.
+> Without it, `gflow video chain` fails up front with exit `20`
+> (`FrameExtractionError`) before reading the manifest or prompting for cost —
+> on `gflow-cli` ≤ 0.74.0 it was a generic exit `1` instead, and Pillow had to be
+> installed by hand (see [KNOWN_ISSUES.md](../KNOWN_ISSUES.md)). Install it with:
 >
 > ```bash
 > pip install 'gflow-cli[chain]'
@@ -1580,6 +1654,7 @@ that privacy setting, so missing names are expected, not a defect.
 ## `gflow update`
 
 Upgrade gflow-cli in place, through the package manager that installed it.
+**Stop every other `gflow` process first** — see below.
 
 ```text
 gflow update [--check] [--json]
@@ -1613,11 +1688,26 @@ be reached; after an upgrade `latest` is the version the venv actually reports;
   installed (`git pull`, reinstall from the checkout); `uv` / `pipx` detected
   but not on `PATH`, or a plain venv with no `pip` module (a `uv venv`): the
   message carries the exact command to run yourself;
-- **after the manager ran** — the venv still reports the old version (a receipt
+- **after the manager ran** — first, the venv can no longer import gflow-cli at
+  all (see below); then, the venv still reports the old version (a receipt
   pinned to one version makes `uv tool upgrade` a silent no-op, for instance),
   or the version could not be re-read at all. The manager's own output is above
   the error. One carve-out: when PyPI was unreachable *and* the manager exited 0
   *and* nothing changed, the manager simply found nothing newer — exit 0.
+
+**A half-replaced environment is detected, not reported as a version.** Managers
+replace files in place, so an interrupted run can leave a venv whose *metadata*
+reads perfectly and whose *imports* are dead — measured on Windows in
+[#848](https://github.com/ffroliva/gflow-cli/issues/848), where an aborted native
+dependency swap left every command dying on `AttributeError: module 'greenlet'
+has no attribute 'greenlet'` while the version still read `0.69.0`. After the
+manager runs, `gflow update` therefore imports gflow-cli in a fresh isolated
+interpreter before it looks at any version. If that import fails the command
+exits 11 saying the install is unusable and quoting the interpreter's own last
+line, and the remediation is a **forced reinstall**
+(`uv tool install "gflow-cli==<version>" --force --reinstall`, or the pipx / pip
+equivalent) — a plain `upgrade` cannot repair that state, because it reads the
+metadata, finds it current and changes nothing.
 
 The venv is the truth, not the manager's exit code: after the manager runs,
 `gflow update` re-reads the installed gflow-cli version from a fresh interpreter
@@ -1629,9 +1719,30 @@ points at the venv's python — so `gflow update` reports it as upgraded with a
 note quoting the manager's exit code; the next update from another shell
 refreshes the launcher.
 
-Restart any running `gflow serve` / MCP server afterwards; a long-lived process
-keeps the old code until it restarts. There is deliberately no MCP twin of this
-command: a server must not replace its own code underneath itself.
+**Stop every other `gflow` process BEFORE you upgrade — not after.** The launcher
+lock just above is the benign case: it is the `gflow.exe` *you* are running, and
+the upgrade lands anyway. A **different** gflow, holding the install's contents
+open, is not — there the manager can abort part-way and leave the environment
+broken. The holder reported so far is **`gflow mcp run`**: an editor with gflow
+registered as an MCP server starts one per session, and they outlive the command
+that started them. Reported with a reproduction in
+[#848](https://github.com/ffroliva/gflow-cli/issues/848#issuecomment-5704903340):
+`uv tool install --force` failed with *"Access is denied"* on
+`…\uv\tools\gflow-cli\Scripts` and left the install answering
+`No module named 'gflow_cli'` until those processes were stopped and the install
+re-run.
+
+Close the editor sessions (or stop the servers) first. On Windows,
+`tasklist | findstr gflow` lists image names only — a server registered as
+`uv run gflow …` shows up as `uv.exe`, not `gflow.exe`; elsewhere
+`pgrep -fa gflow` prints the command line it matched, so you can see what you
+are about to stop. `gflow update` cannot run this check for you: it is itself
+one of those processes. If an upgrade does abort anyway, the exit-11 **forced
+reinstall** above is the repair — run it from a shell with no gflow running.
+
+Restart any running `gflow serve` / MCP server afterwards too; a long-lived
+process keeps the old code until it restarts. There is deliberately no MCP twin
+of this command: a server must not replace its own code underneath itself.
 
 Every command also prints an **update banner** on stderr (a one-line notice when
 stderr is not a terminal) when a newer release is known — see
@@ -1667,7 +1778,7 @@ gflow models --json
 ## JSON output (`--json`)
 
 The generation commands (`image t2i` / `image i2i`, `video t2v` / `i2v` /
-`r2v`), `auth list`, and `gflow models` accept `--json` for machine-to-machine
+`r2v`), `auth list`, `gflow models`, and `gflow docs` accept `--json` for machine-to-machine
 use. When set:
 
 - The command emits **one** parseable JSON object (or array, for `auth list`)
@@ -1896,7 +2007,7 @@ shell scripts can branch on the failure mode without parsing stderr.
 | `0`  | —                     | Success                                          | —                                                          |
 | `1`  | unhandled exception   | Anything not derived from `GFlowError` — **or a deliberate CLI verdict**: `gflow auth status` exits 1 for a dead/unverifiable session | Re-run with `--verbose`; for `auth status` follow the printed hint; file a bug if it persists |
 | `2`  | usage error (Click)   | Bad usage / missing arg / profile missing        | Standard CLI usage error                                   |
-| `3`  | `AuthExpiredError`    | Session cookies rejected by Flow (401/403), or Flow served one of its OAuth/sign-in routes instead of the page gflow asked for ([#756](https://github.com/ffroliva/gflow-cli/issues/756)) | `gflow auth login --profile <name>`                        |
+| `3`  | `AuthExpiredError`    | Session cookies rejected by Flow (401/403), or Flow served one of its OAuth/sign-in routes instead of the page gflow asked for ([#756](https://github.com/ffroliva/gflow-cli/issues/756)) | `gflow auth login --profile <name>` — **but read the error's own `remediation_hint` first.** `AisandboxAuthError` shares this code, and when `gflow credits` fails on an account migrated to `flow.google.com` re-logging in cannot help and can roll the profile's browser-strategy marker back ([#795](https://github.com/ffroliva/gflow-cli/issues/795), [#791](https://github.com/ffroliva/gflow-cli/issues/791)) |
 | `4`  | `RateLimitError`      | Quota / rate limit hit, exhausted retries        | Wait + reduce `GFLOW_CLI_CONCURRENCY`                      |
 | `5`  | `ContentPolicyError`  | Flow rejected the prompt (200 + empty `media[]`) | Soften prompt wording                                      |
 | `6`  | `NetworkError`        | Network failure persisted across 3 attempts      | Check connectivity                                         |
@@ -1918,21 +2029,22 @@ shell scripts can branch on the failure mode without parsing stderr.
 | `22` | `UpscaleUnavailableError` | 4K upscale is gated to Flow **Ultra** accounts (HTTP 403) | Use `--scale 2k`, or upgrade the Flow plan                |
 | `23` | `UiSelectorDriftError` | A Flow editor control could not be located — Google changed the frontend (issues #183, #493) — **or** a blocking announcement overlay survived dismissal, so no control below it can be clicked (probe `overlay_close_button`, #593). On the migrated host a missing submit control is checked against the wallet first and reported as **37** when Flow swapped in its insufficient-credits warning, so a short balance no longer arrives here | Update gflow-cli; file a bug with the probe name + the diagnostics JSON / debug screenshot referenced in the error message, plus the incident bundle's `report.md` when one was written. For `overlay_close_button`: open the project once in Chrome and dismiss the announcement — the dismissal persists on your account |
 | `24` | `BrowserEngineUnavailableError` | `GFLOW_CLI_BROWSER_ENGINE=patchright` but the engine is not installed | `pip install 'gflow-cli[patchright]'`, or unset `GFLOW_CLI_BROWSER_ENGINE` |
-| `25` | `FlowAgentUiError`    | The profile is on Flow's Agentic UI cohort and the classic media panel is unrecoverable for this operation | Rare since v0.38.0 (#332): the mode controller reliably recovers agentic→classic, so first retry with `--ui-mode classic`; if it persists, see KNOWN_ISSUES on the agentic cohort |
+| `25` | `FlowAgentUiError`    | The profile is on Flow's Agentic UI cohort and the classic media panel is unrecoverable for this operation — **or**, on `flow.google.com`, the account's composer is agent-only and there is no classic arm at all ([#799](https://github.com/ffroliva/gflow-cli/issues/799)) | On labs this is rare since v0.38.0 (#332): the mode controller reliably recovers agentic→classic, so first retry with `--ui-mode classic`. The migrated agent-only cohort reports `retryable: false` — no flag or profile change helps; use the Flow web UI. See KNOWN_ISSUES |
 | `26` | `MediaAttributionError` | Generated media could not be reliably attributed to this request (issue #281) | Re-run; a dedicated project with fewer pre-existing assets avoids the ambiguity |
 | `27` | `MediaUploadRejectedError` | Flow's upload endpoint refused the input file (`uploadImage` 4xx, issue #287) | Re-encode the image (`ffmpeg -q:v 2 -map_metadata -1`), or reference the asset by its media UUID |
 | `28` | `UiModeUnavailableError` | The Flow UI arm this command required (`--ui-mode`/`GFLOW_CLI_UI_MODE`; `-i` forces agentic for images; **video always requires classic** — no agentic video driver exists) couldn't be reached after a switch attempt; aborted before submitting — no credits spent (issue #299) | Retry (the cohort flaps per load); try another `--profile`; for images you can also relax `GFLOW_CLI_UI_MODE` — for video there is nothing to relax |
 | `29` | `MentionIndexUnavailableError` | An `@mention` was present but the catalog source needed to resolve it (character entities or media assets) failed to load — distinct from an empty index, which is not an error | Check network connectivity (character source) or `GFLOW_CLI_DB_PATH` / filesystem permissions (media source), then retry |
 | `30` | `QueueSchemaError`    | A `gflow serve`/MCP worker-queue task payload has an unrecognized `schema_version` or fails validation against the typed request DTOs | Usually means gflow-cli was downgraded after a newer version enqueued the task, or the payload was hand-edited; re-enqueue with a compatible version |
-| `31` | `FlowAppError`        | Flow did not serve the page gflow asked for. Two shapes: its error-boundary page rendered instead of the editor (a transient client-side crash), or it redirected to `flow.google.com/about` instead of the project ([#756](https://github.com/ffroliva/gflow-cli/issues/756)) | Crash: retry shortly; if it persists, Flow itself is degraded. `/about`: open the project in a browser on that host and confirm this account can reach it — whether a retry helps is [not measured](superpowers/spikes/2026-09-10-about-redirect-stability.md), so gflow does not flag it retryable |
+| `31` | `FlowAppError`        | Flow did not serve the page gflow asked for. Two shapes: its error-boundary page rendered instead of the editor (a transient client-side crash), or it redirected to `flow.google.com/about` instead of the project ([#756](https://github.com/ffroliva/gflow-cli/issues/756)) | Crash: retry shortly; if it persists, Flow itself is degraded. `/about`: open the project in a browser on that host and confirm this account can reach it. A retry is **measured** not to help — 5/5 consecutive attempts during a live occurrence landed on `/about` again ([2026-09-11](superpowers/spikes/2026-09-11-about-redirect-is-stable-for-an-account.md); the [2026-09-10 run](superpowers/spikes/2026-09-10-about-redirect-stability.md) got 0/5 only because the redirect had stopped reproducing) — so gflow does not flag it retryable. The cause, and whether it ever clears, are still unmeasured |
 | `32` | `ReferenceNotFoundError` | A referenced media NAME is not in this project's picker. Flow indexes a short auto-caption, not the generation prompt, so a prompt used as a reference name never matches | Reference the asset by its media UUID, pass a local file with `--ref`, or check what exists with `gflow data list images` |
 | `33` | — (`gflow doctor` verdict) | Doctor found warn/fail findings — a successful diagnosis, not an error class | Review the report; see [`gflow doctor`](#gflow-doctor) |
 | `34` | `SyncPartialError`    | `gflow data sync` failed on some projects but succeeded on others — completed writes stay committed | Retryable: re-run the same command; it resumes with what is still nameless (see [`gflow data sync`](#gflow-data-sync)) |
 | `35` | `ExtendUnavailableError` | No Veo extend model is orderable for this account and aspect — the extend family is tier-gated and there is no square variant. **Never auto-retry**: a tier gate does not clear on its own. |
-| `36` | `FlowHostMigratedError` | Flow served the project from `flow.google.com` and the request could not be represented by the migrated composer, or `GFLOW_CLI_FLOW_HOST=labs.google` disabled it. Supported today: `video t2v`; local-file video i2v/r2v; `image t2i`; and local-file `image i2i`. Image UUID/entity/instruction/Imagen-4 forms, `image batch`, and the `3:4` image aspect remain unsupported. Not selector drift (23) | **Not retryable.** Use one of the supported forms — `--project` is required for images as well as video — or the REST surface (`gflow project list`, `gflow data …`); follow #639 for the remaining matrix |
+| `36` | `FlowHostMigratedError` | Flow served the project from `flow.google.com` and the request could not be represented by the migrated composer, or `GFLOW_CLI_FLOW_HOST=labs.google` disabled it. Supported today: `video t2v`; local-file video i2v/r2v; `image t2i`; and local-file `image i2i`. Image UUID/entity/instruction/Imagen-4 forms and `image batch` remain unsupported. Not selector drift (23) | **Not retryable.** Use one of the supported forms, or the REST surface (`gflow project list`, `gflow data …`); follow #639 for the remaining matrix |
 | `37` | `InsufficientCreditsError` | The account's balance is short **for the model it asked for**, so Flow **replaced** the submit control with its `Insufficient credits warning` instead of disabling it. Short, not necessarily empty: measured 2026-09-07, an account holding **50** credits requesting `--model veo-quality` (**100**) rendered the warning. Explicitly **not** selector drift (23): reporting it as drift told users to file a frontend bug over a credit shortfall | Check the balance with `gflow credits user`, then pick a cheaper `--model` (`veo-lite` costs 10), top up, or wait for the allowance to reset. Nothing was submitted, so no credit was spent. `gflow image` draws on a separate daily quota and may still work |
 | `38` | `FlowAccountChooserError` | The post-migration hop landed on Google's account chooser and the profile's recorded account (`.gflow_account`) could not be selected automatically (row absent, click-through did not return to the editor, or `--account` mismatch) | **Not retryable**: run `gflow auth login --profile <name>` and complete the chooser manually, while signed in as the recorded account (re-run `gflow auth login` if the chooser offers a different session) |
-| `39` | `AvatarUnavailableError` | Flow's Avatar/likeness is not usable on this account — identity-verification / region gate. Raised BEFORE any submit, so nothing was spent | NOT retryable: a region verdict is the same on a re-run. Confirm the Avatar tab works in Flow's web UI; otherwise use [`gflow character`](#gflow-character) or `--ref` (see [§ Avatar availability](#avatar-availability-region-and-account-eligibility)) |
+| `39` | `FlowAccessUnavailableError` | Flow loaded and routed to its own "you don't have access" screen (`<flow-pinhole-unavailable-screen>`): this Google account has no Flow entitlement. Detected by component, not by URL — the hop is client-side (`flow.google.com/` answers 200) and the path varies (`/unavailable`, `/u/8/unavailable`). Explicitly **not** auth expiry (3/8) and **not** selector drift (23): nothing expired and nothing drifted | **Not retryable, and signing in again cannot change it.** Flow needs an age-verified account in a supported region on a Google AI Plus/Pro/Ultra or qualifying Workspace plan — check which applies at [Google's eligibility page](https://support.google.com/flow/answer/16353333) and open https://flow.google.com in a browser on this account to confirm |
+| `40` | `AvatarUnavailableError` | Flow's Avatar/likeness is not usable on this account — identity-verification / region gate. Raised BEFORE any submit, so nothing was spent | NOT retryable: a region verdict is the same on a re-run. Confirm the Avatar tab works in Flow's web UI; otherwise use [`gflow character`](#gflow-character) or `--ref` (see [§ Avatar availability](#avatar-availability-region-and-account-eligibility)) |
 | `130`| SIGINT                | User-interrupted (Ctrl-C)                        | —                                                          |
 
 **Exit code 16 — data store / migration error.** Fires when:
@@ -1962,7 +2074,7 @@ if [ "$rc" -ne 0 ]; then
 
   case "$rc" in
     2)   echo "Bad CLI usage (missing arg, bad flag)"; exit 1 ;;
-    3)   echo "Auth expired — run: gflow auth login"; exit 1 ;;
+    3)   echo "Auth rejected — read the error's remediation_hint; it is NOT always a re-login"; exit 1 ;;
     4|6) echo "Transient infra issue (rate limit / network) — try again later"; exit 1 ;;
     5)   echo "Content policy rejected the prompt — rewrite and retry"; exit 1 ;;
     7)   echo "Flow API shape changed — upgrade gflow-cli or file a bug"; exit 1 ;;
