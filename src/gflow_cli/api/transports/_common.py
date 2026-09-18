@@ -12,6 +12,7 @@ Extracted before strategies are written so the duplication never lands.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any
 from urllib.parse import urlsplit
@@ -24,6 +25,7 @@ from gflow_cli.data.redaction import redact_error_detail
 from gflow_cli.errors import (
     AuthExpiredError,
     ContentPolicyError,
+    FlowAccessUnavailableError,
     FlowAccountChooserError,
     FlowApiError,
     FlowAppError,
@@ -181,6 +183,11 @@ def flow_landing_kind(url: object) -> str | None:
     return None
 
 
+#: Google's account-index path segment, e.g. `/u/8/unavailable`. Collapsed rather
+#: than dropped: the shape is worth seeing in a bug report, the ordinal is not.
+_ACCOUNT_INDEX_RE = re.compile(r"/u/\d+/")
+
+
 def safe_page_url(url: object) -> str:
     """A page URL reduced to scheme+host+path — safe to put in a user-facing message.
 
@@ -188,6 +195,13 @@ def safe_page_url(url: object) -> str:
     tokens (`TL=...`) in the query. Error text is the artifact users are asked to paste
     into GitHub issues, so the query and fragment have no business in it. Measured live
     on 2026-09-10: a real `gflow image t2i` failure printed all of those.
+
+    Google's account-index segment (`/u/8/`) is collapsed to `/u/N/` for the same
+    reason. It is not an address, but it is account-correlatable — it says how many
+    accounts that browser session holds — and it is never diagnostic: gflow has no
+    `/u/N` handling anywhere, so the number tells a reader nothing it could act on.
+    `redact_error_detail` has no rule for it, so without this the segment would also
+    persist verbatim into the failed-operation row.
 
     Anything unparseable comes back as the empty string rather than raising — this is
     only ever called while another failure is already being reported.
@@ -199,10 +213,43 @@ def safe_page_url(url: object) -> str:
         return ""
     if not parts.scheme or not parts.netloc:
         return text
-    return f"{parts.scheme}://{parts.netloc}{parts.path}"
+    return f"{parts.scheme}://{parts.netloc}{_ACCOUNT_INDEX_RE.sub('/u/N/', parts.path)}"
 
 
-def raise_if_known_landing(page: object, *, requested: str, at: str) -> None:
+#: Flow's own component for "this account cannot use Flow". Measured 2026-09-15 on a
+#: new free Google account (`scripts/dev/spike_flow_unavailable_signal.py`): the shell
+#: renders `aisandbox-root > router-outlet > flow-pinhole-unavailable-screen`.
+#:
+#: A component tag, not a path, and not a status. The spike found no entitlement field
+#: on the wire; `flow.google.com/` answers **200** with the hop done client-side, so
+#: there is no 3xx to read; and the path is not stable — `/unavailable` and
+#: `/u/8/unavailable` were both observed on one account, the latter carrying Google's
+#: account-index segment. The component is the only anchor that survives all three,
+#: and it is locale-invariant by construction (AGENTS.md Tier 1).
+UNAVAILABLE_SCREEN = "flow-pinhole-unavailable-screen"
+
+
+async def _shows_unavailable_screen(page: object) -> bool:
+    """True when Flow has rendered its unavailable screen on `page`.
+
+    Total by construction, like its URL-reading siblings: a probe that fails is a probe
+    that saw nothing, never one that displaces the caller's own diagnosis — which is the
+    failure it is being called from the middle of. The cost of failing closed is that the
+    caller's exit-23 report stands, i.e. exactly today's behaviour, so the log line below
+    is the only way a dead locator engine is ever visible.
+    """
+    # Annotated Any deliberately: `page` is typed `object` for the same reason the URL
+    # siblings are, and pyright cannot see `.locator` on it. The try covers a page that
+    # has no locator at all (the attribute-less stubs in tests/test_errors_classification).
+    p: Any = page
+    try:
+        return bool(await p.locator(UNAVAILABLE_SCREEN).count() > 0)
+    except Exception as exc:  # noqa: BLE001 - a probe that fails is a probe that saw nothing
+        log.debug("ui_driver.unavailable_probe_failed", error=type(exc).__name__)
+        return False
+
+
+async def raise_if_known_landing(page: object, *, requested: str, at: str) -> None:
     """Replace an about-to-be-raised drift report when the page is a **known landing**.
 
     Call this from **inside a failure branch**, at a point where the caller is already
@@ -229,11 +276,35 @@ def raise_if_known_landing(page: object, *, requested: str, at: str) -> None:
     being in it.
     """
     url = str(getattr(page, "url", "") or "")
+    safe = safe_page_url(url)
+
+    # Checked before the URL kinds, and by DOM rather than path. This state is
+    # invisible to `flow_landing_kind`: the unavailable screen is served from a Flow
+    # origin on an ordinary path, so the URL half returns None and the caller's drift
+    # diagnosis stands. Measured as an A/B on 2026-09-15 with this probe neutered: the
+    # caller reported exit 23, "Google may have updated their frontend — file a bug",
+    # and wrote an incident bundle holding a screenshot of the user's own account page,
+    # for an account that simply has no Flow subscription.
+    if await _shows_unavailable_screen(page):
+        log.info(
+            "ui_driver.known_landing", at=at, kind="unavailable", url=safe, requested=requested
+        )
+        raise FlowAccessUnavailableError(
+            detail=(
+                f"Flow served its unavailable screen ({safe}) instead of {requested} — "
+                f"this Google account cannot reach Flow at all. Not selector drift, and "
+                f"not a session problem: the app loaded and routed to the screen it "
+                f"renders for an account without access."
+            ),
+            # Measured, not a class default: the screen renders on every visit for
+            # this account, and no login can grant access that was never purchased.
+            retryable=False,
+        )
+
     kind = flow_landing_kind(url)
     if kind is None:
         return
-    safe_url = safe_page_url(url)
-    log.info("ui_driver.known_landing", at=at, kind=kind, url=safe_url, requested=requested)
+    log.info("ui_driver.known_landing", at=at, kind=kind, url=safe, requested=requested)
     if kind == "chooser":
         # The existing class for "we are at the chooser and cannot proceed" (#763/#764,
         # exit 38). Path-only, so no DOM probe is needed here — the bootstrap handler
@@ -241,7 +312,7 @@ def raise_if_known_landing(page: object, *, requested: str, at: str) -> None:
         # reaches it.
         raise FlowAccountChooserError(
             detail=(
-                f"Google's account chooser is displayed ({safe_url}) instead of "
+                f"Google's account chooser is displayed ({safe}) instead of "
                 f"{requested} — the session needs a person to pick an account. "
                 f"Not selector drift."
             )
@@ -249,7 +320,7 @@ def raise_if_known_landing(page: object, *, requested: str, at: str) -> None:
     if kind == "signin":
         raise AuthExpiredError(
             detail=(
-                f"Flow served one of its OAuth/sign-in routes ({safe_url}) instead of "
+                f"Flow served one of its OAuth/sign-in routes ({safe}) instead of "
                 f"{requested} — this session is not signed in to Flow on that host, so "
                 f"none of the controls gflow drives are on the page. Not selector drift."
             )
@@ -259,7 +330,7 @@ def raise_if_known_landing(page: object, *, requested: str, at: str) -> None:
     # happens — so naming one here would just be a second confident wrong diagnosis.
     raise FlowAppError(
         detail=(
-            f"Flow redirected to its public landing page ({safe_url}) instead of "
+            f"Flow redirected to its public landing page ({safe}) instead of "
             f"{requested}. gflow cannot tell from here why it declined — this account "
             f"may not have access to that project on this host. It is not selector "
             f"drift, and no gflow-cli release changes it."
@@ -278,13 +349,24 @@ def migrated_route(url: object, flow_host: str, *, prefer_migrated: bool = False
     """Which driver a page gets: ``"labs"``, ``"migrated"`` or ``"blocked"``.
 
     ``flow_host`` is ``Settings.flow_host``. ``flow.google.com`` forces the migrated
-    composer; ``labs.google`` refuses it, so a moved account keeps exit 36
-    (``blocked``). ``auto`` — the default — makes flow.google.com the default host
-    for every request it can serve (``prefer_migrated``, decided by the caller from
-    the request: t2v with a project today), on moved and unmoved accounts alike;
-    anything else follows the served host, so an unmoved account keeps the labs
-    driver for the features the new host has not been ported for. An unreadable
-    URL with nothing to prefer routes to the labs driver, exactly as before.
+    composer; ``labs.google`` refuses it, so an account served the new host keeps
+    exit 36 (``blocked``). ``auto`` — the default — makes flow.google.com the default
+    host for every request it can serve (``prefer_migrated``, decided by the caller
+    from the request: t2v with a project today); anything else follows the host that
+    was actually served. An unreadable URL with nothing to prefer routes to the labs
+    driver, exactly as before.
+
+    **This function routes on the host SERVED, never on a property of the account.**
+    The distinction is not pedantry: a 2026-09-14 survey (3 accounts x 2 entry points
+    x 2 runs) found ``labs.google/fx/tools/flow`` answering **HTTP 308** every time,
+    while those same accounts differed in which capabilities worked. Host membership is
+    therefore uniform where capability is not, so it does not predict capability.
+
+    That says nothing about the labs arm below, which is reached for reasons that are
+    not about host membership at all — an unreadable URL, ``about:blank``, or any
+    request the caller did not prefer the migrated host for. Those are the common path,
+    not a legacy one. See
+    docs/superpowers/spikes/2026-09-14-two-domain-protocol-survey.md.
     """
     if flow_host == "flow.google.com":
         return "migrated"

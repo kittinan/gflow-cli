@@ -190,7 +190,10 @@ class FlowWorker:
                         # with the task parameters derived from get_settings().
                         settings=settings,
                     ) as client:
-                        project_title = task.payload.get("project_title", "gflow-cli images")
+                        # `project_name` is the key both producers write (mcp/tools.py and
+                        # the CLI); this read was `project_title`, which nothing has ever
+                        # written, so every agent-supplied name was silently dropped (#628).
+                        project_title = task.payload.get("project_name", "gflow-cli images")
                         project_created = False
                         if project_id:
                             project_flow_id = project_id
@@ -328,6 +331,12 @@ class FlowWorker:
                         out_dir=out_dir,
                         settings=settings,  # same rationale as the image path above
                     ) as client:
+                        # #864: as `gflow video t2v --project-name` does. Without a
+                        # name, client.generate_video creates the project itself.
+                        project_name = task.payload.get("project_name")
+                        if project_id is None and project_name:
+                            created = await client.create_project(title=project_name)
+                            project_id = created.project_id
                         # Resolve @-mentions and expand --tool specs (shared helper).
                         from gflow_cli.services.mentions import resolve_and_apply
 

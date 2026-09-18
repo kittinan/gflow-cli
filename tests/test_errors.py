@@ -202,18 +202,18 @@ def test_upscale_unavailable_error_exit_code_22():
     assert next(code for cls, code in EXIT_CODE_MAP.items() if isinstance(err, cls)) == 22
 
 
-def test_avatar_unavailable_error_exit_code_39():
+def test_avatar_unavailable_error_exit_code_40():
     """Flow's Avatar is verified-identity + region gated, so "your account
     cannot use Avatar" is a DIFFERENT answer from "the UI drifted" (23): one is
     unfixable by any gflow release, the other is exactly what a release fixes.
-    Exit 39 lets a script tell them apart, and the error must not be advertised
+    Exit 40 lets a script tell them apart, and the error must not be advertised
     as retryable — a region verdict answers identically on a re-run.
     """
     err = AvatarUnavailableError(detail="account not eligible: REGION")
     assert isinstance(err, GFlowError)
     assert not isinstance(err, UiSelectorDriftError)
-    assert EXIT_CODE_MAP[AvatarUnavailableError] == 39
-    assert _exit_code_for(err) == 39
+    assert EXIT_CODE_MAP[AvatarUnavailableError] == 40
+    assert _exit_code_for(err) == 40
     assert not is_retryable(err)
     assert len(err.to_problem_details()["remediation_hint"]) > 10
 
@@ -705,10 +705,14 @@ def test_specific_remediation_hints() -> None:
         SceneConcatError().remediation_hint
         == "Ensure video clip dimensions and codecs match before concatenation"
     )
+    # #813: the hint must name the extra AND both packages it carries. It used to
+    # say only "PyAV", so an operator whose `gflow-cli[chain]` install was missing
+    # Pillow was told to check the one dependency they already had.
     assert (
         FrameExtractionError().remediation_hint
-        == "Verify input video file is readable and non-corrupt. Ensure gflow-cli[chain] "
-        "dependencies (PyAV) are installed."
+        == "Verify input video file is readable and non-corrupt. Ensure the gflow-cli[chain] "
+        "extra and both packages it carries (av, pillow) are installed: "
+        "pip install 'gflow-cli[chain]'"
     )
     # #493: the hint must name the artifacts drift sites actually write (the
     # mode-switch probe produces a diagnostics JSON, not a screenshot) — exact
