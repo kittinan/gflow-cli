@@ -153,6 +153,9 @@ class FakeLoc:
     async def all_text_contents(self) -> list[str]:
         return [str(i) for i in self.items]
 
+    async def focus(self) -> None:
+        return None
+
     async def click(self, **_: Any) -> None:
         if self.kind == "upload":
             self.page.upload_clicked += 1
@@ -326,6 +329,16 @@ class _CharLoc:
     async def all_text_contents(self) -> list[str]:
         return [str(i) for i in self.items]
 
+    async def focus(self) -> None:
+        return None
+
+    async def wait_for(self, **_: Any) -> None:
+        if self.kind == "tab" and self.page.tab_missing_first > 0:
+            self.page.tab_missing_first -= 1
+            raise TimeoutError("tab not rendered yet")
+        if not self.items:
+            raise TimeoutError("never rendered")
+
     async def fill(self, text: str) -> None:
         self.page.searches += 1
         self.page.query = text
@@ -358,10 +371,14 @@ class FakeCharacterPickerPage:
         has_tab: bool = True,
         tab_filters: bool = True,
         miss_first: int = 0,
+        tab_missing_first: int = 0,
     ) -> None:
         self.keyboard = FakeKeyboard(self)  # type: ignore[arg-type]
         self.library = library
         self.has_tab, self.tab_filters, self.miss_first = has_tab, tab_filters, miss_first
+        #: Live 2026-09-18: in a full CLI run the picker rendered its rail slower than
+        #: the fixed 2.2 s wait, so the tab was "missing" on a picker that was opening.
+        self.tab_missing_first = tab_missing_first
         self.typed: list[str] = []
         self.chips: list[dict[str, str]] = []
         self.tab_selected = False
@@ -395,6 +412,8 @@ class FakeCharacterPickerPage:
             return _CharLoc(self, "option", self._options())
         if css == mc.PICKER_CONFIRM:
             return _CharLoc(self, "confirm", [])
+        if css == mc.PICKER:
+            return _CharLoc(self, "popover", ["popover"])
         raise AssertionError(f"unmodelled selector: {css!r}")
 
     async def wait_for_timeout(self, _ms: float) -> None:
@@ -468,6 +487,20 @@ async def test_a_late_index_is_retried_with_escape_never_backspace() -> None:
     after_first_at = page.typed[page.typed.index("@") :]
     assert "<Escape>" in after_first_at
     assert "<Backspace>" not in after_first_at  # the up-front clear_composer is separate
+
+
+async def test_a_slow_picker_is_waited_for_and_retried_not_called_drift() -> None:
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakeCharacterPickerPage(_tun_project(), tab_missing_first=1)
+    await MigratedComposer().attach_character_entities(
+        page,  # type: ignore[arg-type]
+        entity_ids=("42a8618b",),
+        names=("tun",),
+    )
+    assert [c["reference_type"] for c in page.chips] == ["entity"]
+    assert page.typed.count("@") == 2
+    assert "<Escape>" in page.typed
 
 
 async def test_no_characters_tab_is_selector_drift_not_a_guess() -> None:
@@ -597,3 +630,33 @@ def test_a_character_run_is_moved_onto_the_migrated_host_like_any_other() -> Non
     assert migrated_can_serve(req, "proj-1") is True
     # The name requirement still travels with it: no name, no picker query, no move.
     assert migrated_can_serve(_r2v(reference_entities=("ent-kael",)), "proj-1") is False
+
+
+async def test_a_character_after_a_reference_chip_types_at_the_end_of_the_prompt() -> None:
+    """Live 2026-09-18 (r2v --ref + --reference-entity): the reference chip sat where the
+    composer click landed, the ``@`` went nowhere, and no picker opened — reported as a
+    missing Characters tab. The caret is now sent to the end before every ``@``."""
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakeCharacterPickerPage(_tun_project())
+    page.chips = [{"text": "ref.png", "entity_id": "", "reference_type": "media"}]
+    await MigratedComposer().attach_character_entities(
+        page,  # type: ignore[arg-type]
+        entity_ids=("42a8618b",),
+        names=("tun",),
+        clear=False,
+    )
+    at = page.typed.index("@")
+    assert page.typed[at - 1] == "<Control+End>"
+    assert [c["reference_type"] for c in page.chips] == ["media", "entity"]
+
+
+async def test_a_second_media_reference_also_types_at_the_end() -> None:
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakeComposerPage()
+    composer = MigratedComposer()
+    await composer._mention_by_name(page, "me.jpg", expect_chips=1)  # noqa: SLF001
+    await composer._mention_by_name(page, "product1.png", expect_chips=2)  # noqa: SLF001
+    ats = [i for i, k in enumerate(page.typed) if k == "@"]
+    assert all(page.typed[i - 1] == "<Control+End>" for i in ats)

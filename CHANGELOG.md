@@ -58,6 +58,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`r2v --ref` + `--reference-entity` on the migrated host stopped at "no Characters
+  tab" (exit 23).** Two measured causes, both after the reference chip is in the prompt.
+  The composer click can land on that chip, leaving the caret on a non-editable node, so
+  the next `@` went nowhere — the caret is now sent to the end (Ctrl+End) before every
+  `@`, for characters and for a second media reference alike. And in a full CLI run the
+  picker rendered its category rail later than the fixed 2.2 s wait that sufficed in
+  isolation; the Characters tab is now waited for (up to 8 s), a picker that never shows
+  it is retried like a search miss (`migrated.character_tab_missing` logs whether the
+  popover opened), and only a tab absent on every attempt is reported as drift. Live:
+  the reporter's exact `r2v --ref product.png --reference-entity … --model veo-lite-lp`
+  → exit 0, 8 s 720x1280 clip with the character AND the product.
+
 - **`@Name` characters in a prompt, and `gflow character list`, failed on migrated
   accounts.** Both read the project's characters from labs `flow.projectInitialData`,
   which now answers 404 *"Flow RPCs have been deprecated and disabled"* (measured

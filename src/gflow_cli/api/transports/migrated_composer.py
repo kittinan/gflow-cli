@@ -246,6 +246,8 @@ PICKER_OPTION_TITLE = ".asset-title"
 #: character ``Tun``, and Enter commits the first option — so without this tab a
 #: character whose name any file shares can never be picked. With it, one option.
 PICKER_CHARACTERS_TAB = f"{PICKER} [role='tab']:has(mat-icon:text-is('accessibility_new'))"
+#: How long an ``@`` is given to render the picker's rail before the attempt is retried.
+CHARACTER_TAB_WAIT_MS = 8_000
 #: The Ingredients sub-mode holds references; Frames holds the i2v chips.
 INGREDIENTS_LIGATURE = "chrome_extension"
 #: The only duration at which this host offers reference-to-video. Measured 2026-09-06 at
@@ -2023,6 +2025,21 @@ class MigratedComposer:
             MENTION_CHIP,
         )
 
+    @staticmethod
+    async def _caret_to_end(page: Page) -> None:
+        """Put the caret at the END of the prompt, where the next ``@`` must go.
+
+        A click alone is not enough once a chip is in the prompt. Measured 2026-09-18
+        (r2v with a ``--ref`` and a ``--reference-entity``): the reference chip sat where
+        the click landed, the caret stayed on that non-editable chip, and the ``@`` typed
+        next went nowhere — no picker opened, which surfaced as a missing Characters tab.
+        Ctrl+End after the click restores it (same probe: popover, tab and entity chip).
+        """
+        composer = page.locator(COMPOSER).first
+        await composer.click(timeout=5000)
+        await composer.focus()
+        await page.keyboard.press("Control+End")
+
     async def _mention_character(self, page: Page, name: str, *, expect_chips: int) -> None:
         """Insert one CHARACTER chip for *name*: ``@``, the Characters tab, search, click.
 
@@ -2035,21 +2052,32 @@ class MigratedComposer:
         """
         offered: list[str] = []
         chips = await self.read_chips(page)
+        tab_seen = False
+        popover_open = 0
         for attempt in range(1, FRAME_SEARCH_ATTEMPTS + 1):
-            await page.locator(COMPOSER).first.click(timeout=5000)
+            await self._caret_to_end(page)
             await page.keyboard.type("@", delay=120)
-            await page.wait_for_timeout(2200)
-            tab = page.locator(PICKER_CHARACTERS_TAB)
-            if not await tab.count():
-                await page.keyboard.press("Escape")
-                raise UiSelectorDriftError(
-                    detail=(
-                        "migrated host: the @ picker shows no Characters tab "
-                        "(mat-icon 'accessibility_new'), so a character cannot be told "
-                        "apart from files sharing its name. Refusing rather than guessing"
-                    ),
+            # Wait for the tab itself, not a fixed pause: a full CLI run rendered the
+            # picker's rail later than the 2.2 s that sufficed in isolation (live
+            # 2026-09-18), and a slow picker is a miss to retry, not selector drift.
+            tab = page.locator(PICKER_CHARACTERS_TAB).first
+            try:
+                await tab.wait_for(state="visible", timeout=CHARACTER_TAB_WAIT_MS)
+            except Exception:  # noqa: BLE001 - Playwright raises its own TimeoutError
+                popover_open = await page.locator(PICKER).count()
+                log.info(
+                    "migrated.character_tab_missing",
+                    name=name,
+                    attempt=attempt,
+                    popover_open=popover_open,
                 )
-            await tab.first.click(timeout=5000)
+                await page.keyboard.press("Escape")
+                await page.wait_for_timeout(800)
+                if attempt < FRAME_SEARCH_ATTEMPTS:
+                    await page.wait_for_timeout(FRAME_SEARCH_RETRY_PAUSE_S * 1000)
+                continue
+            tab_seen = True
+            await tab.click(timeout=5000)
             await page.wait_for_timeout(1500)
             await page.locator(f"{PICKER} {PICKER_SEARCH}").first.fill(name)
             await page.wait_for_timeout(2500)
@@ -2082,6 +2110,16 @@ class MigratedComposer:
             await page.wait_for_timeout(800)
             if attempt < FRAME_SEARCH_ATTEMPTS:
                 await page.wait_for_timeout(FRAME_SEARCH_RETRY_PAUSE_S * 1000)
+        if not tab_seen:
+            raise UiSelectorDriftError(
+                detail=(
+                    "migrated host: the @ picker never showed its Characters tab "
+                    f"(mat-icon 'accessibility_new') in {FRAME_SEARCH_ATTEMPTS} attempts "
+                    f"(picker {'open' if popover_open else 'not open'} on the last), so a "
+                    "character cannot be told apart from files sharing its name. "
+                    "Refusing rather than guessing"
+                ),
+            )
         raise ReferenceNotFoundError(
             detail=(
                 f"migrated host: character {name!r} did not attach in "
@@ -2105,7 +2143,7 @@ class MigratedComposer:
         chips = await self.read_chips(page)
         for attempt in range(1, FRAME_SEARCH_ATTEMPTS + 1):
             before = len(chips)
-            await page.locator(COMPOSER).first.click(timeout=5000)
+            await self._caret_to_end(page)
             # `keyboard.type`, never `insert_text`: the latter dispatches input events with
             # no key events, so the mention plugin opens a picker with no query behind it
             # and every later gesture is a no-op. `send_prompt` keeps insert_text on
