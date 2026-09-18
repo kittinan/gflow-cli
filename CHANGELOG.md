@@ -58,6 +58,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`@Name` characters in a prompt, and `gflow character list`, failed on migrated
+  accounts.** Both read the project's characters from labs `flow.projectInitialData`,
+  which now answers 404 *"Flow RPCs have been deprecated and disabled"* (measured
+  2026-09-18) — so any prompt with an `@` stopped at exit 29 before submitting, and
+  `character list` at exit 7. On that 404 the listing now comes from the flow.google.com
+  app's own project load: a temporary page opens the project and keeps its `Zzl0ze`
+  reply, whose payload holds one row per character (id, name, reference workflows,
+  personality, thumbnail), located by shape rather than position. Free; a few seconds,
+  only when a prompt carries an `@` or on `character list`. Any other labs failure still
+  surfaces as before. Live: `character list` → Tun; `video t2v "@Tun …" --model
+  veo-lite-lp` → exit 0, 8 s 720x1280 clip with audio and the character.
+  `character create` remains labs-only and broken on these accounts (KNOWN_ISSUES).
+
 - **A character on the migrated host was never picked when a file shared its name.** The
   `@` picker lists media and characters together, unranked, and the mention was committed
   with Enter — the FIRST option. Live 2026-09-18, `@tun` offered fourteen

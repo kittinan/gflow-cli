@@ -820,10 +820,11 @@ gflow video r2v "blend these worlds" --ref a.png --ref b.png --ref c.png --model
 > name matches exactly, and then reads the chip back to check it carries
 > `data-reference-type="entity"` with the id you asked for.
 >
-> **Do not also write `@<name>` in the prompt text.** A prompt `@mention` is resolved
-> against the character catalog, which is read through a labs route Flow has retired on
-> migrated accounts, so it fails with exit 29 before anything is submitted. The
-> `--reference-entity` flags alone put the character on the generation.
+> **`@<name>` in the prompt works too** — `"@Tun walks in…"` resolves to the project's
+> character and attaches it exactly as the two flags would. The character catalog behind
+> it is read from the flow.google.com project load (rpcid `Zzl0ze`), because the labs
+> route it used (`projectInitialData`) now answers 404 on migrated accounts; that adds a
+> few seconds to a run whose prompt carries an `@`.
 >
 > **`--duration 4` and `--duration 6` are refused on this path (exit 11).** At those two
 > lengths the host does not refuse — it drops the references, types their file *names*

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import os
 import re
@@ -42,7 +43,12 @@ from gflow_cli.api._engine import (
     run_teardown_step,
 )
 from gflow_cli.api._retry import parse_retry_after, post_with_retry
-from gflow_cli.api.character import Character, CharacterImageRequest, parse_characters
+from gflow_cli.api.character import (
+    Character,
+    CharacterImageRequest,
+    parse_characters,
+    parse_migrated_characters,
+)
 from gflow_cli.api.dto import (
     AssetInfo,
     CreditsInfo,
@@ -3159,10 +3165,62 @@ class FlowApiClient:
         """
         trpc_input = json.dumps({"json": {"projectId": project_id}}, separators=(",", ":"))
         url = f"{routes.PROJECT_INITIAL_DATA_URL}?input={quote(trpc_input, safe='')}"
-        data = await self._get_json(url, route_name="projectInitialData")
+        try:
+            data = await self._get_json(url, route_name="projectInitialData")
+        except WireFormatError as exc:
+            # Measured 2026-09-18: on a migrated account the labs route answers 404
+            # "Flow RPCs have been deprecated and disabled" — the retirement that took
+            # createProject (#864). The migrated app loads the same facts on project
+            # open; read them from there. Anything else is a real failure, not masked.
+            if exc.status != 404:
+                raise
+            payload = await self._fetch_migrated_project_data(project_id)
+            chars = parse_migrated_characters(payload, project_id)
+            logger.info("character.list_fetched_migrated", project_id=project_id, count=len(chars))
+            return chars
         chars = parse_characters(_unwrap_trpc(data))
         logger.debug("character.list_fetched", project_id=project_id, count=len(chars))
         return chars
+
+    async def _fetch_migrated_project_data(self, project_id: str) -> Any:
+        """The flow.google.com app's own ``Zzl0ze`` payload for *project_id*.
+
+        The app requests it on every project open, so a temporary page opens the project
+        and keeps that reply — no request of ours to forge, no ``at`` token to scrape.
+        A temporary page (not a pooled one) because callers may already hold the pool's
+        only page; FREE — nothing is submitted. ~5-10 s.
+        """
+        from gflow_cli.api.transports.batchexecute import parse_frames
+        from gflow_cli.api.transports.migrated_composer import MIGRATED_PROJECT_URL
+
+        if not is_media_uuid(project_id):
+            msg = f"Invalid project_id: {project_id!r}"
+            raise ValueError(msg)
+        ctx = self._context
+        if ctx is None:
+            msg = "FlowApiClient not entered — use `async with`"
+            raise RuntimeError(msg)
+        page = await ctx.new_page()
+        try:
+            async with page.expect_response(
+                lambda r: "rpcids=Zzl0ze" in r.url, timeout=45_000
+            ) as info:
+                await page.goto(
+                    MIGRATED_PROJECT_URL.format(project_id=project_id),
+                    wait_until="domcontentloaded",
+                    timeout=45_000,
+                )
+            body = await (await info.value).text()
+        finally:
+            with contextlib.suppress(Exception):
+                await page.close()
+        for rpcid, payload in parse_frames(body):
+            if rpcid == "Zzl0ze":
+                return payload
+        raise WireFormatError(
+            detail="the flow.google.com project load carried no Zzl0ze frame",
+            route="Zzl0ze",
+        )
 
     async def fetch_project_listing(self, project_id: str) -> JsonObject:
         """Fetch the raw ``flow.projectInitialData`` listing for *project_id*.

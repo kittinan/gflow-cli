@@ -38,20 +38,19 @@ claiming success.
 
 **Re-reading the session does not refresh it — a fresh sign-in does.** Reading the session endpoint re-issues the session cookie on every call but never moves `expires` (three reads, 40 s apart, deadline unchanged), so the session is absolute rather than rolling. On a profile that had lapsed 2.6 hours earlier, opening that endpoint twice inside a real Chrome context left both `expires` and `ACCESS_TOKEN_REFRESH_NEEDED` untouched, in the page and on disk (2026-09-13). What *does* mint a new session is NextAuth's own sign-in (`csrf` → `signin/google` → Google OAuth → callback): on a copy of a genuinely lapsed profile (past `expires`, `ACCESS_TOKEN_REFRESH_NEEDED`, and — note — a stale `access_token` still present) it came back with a future `expires` and no `error`, with no click, because Google's SSO session was still alive (2026-09-18). gflow now does that once per run on its own — at client start when the cached deadline has passed, and whenever the token turns out missing or stale — see "Browser session expires periodically" below. When Google wants a human it stops, and `gflow auth login` is the fix. `gflow auth status` prints the deadline, and a run warns when it is within two hours or already past.
 
-### `gflow character create` / `list` fail on migrated accounts — Flow retired the labs RPCs
+### `gflow character create` fails on migrated accounts — Flow retired the labs RPCs
 
 - **Status:** Open · **Severity:** High for character workflows · **Affected:** accounts served `flow.google.com`
 - **Measured 2026-09-18** (`kittinansr2`): `character create` → exit 7, route `createEntity`, and
   `character list` → exit 7, route `projectInitialData`, both HTTP 404 *"Flow RPCs have been
   deprecated and disabled. Flow has migrated to https://flow.google.com."* — the same retirement
-  that took `project.createProject` (#864). A prompt `@mention` of a character reads the same
-  catalog and fails with exit 29.
-- **Still works:** using an EXISTING character on a generation —
-  `--reference-entity <id> --reference-entity-name <name>` drives the flow.google.com picker, not
-  the retired route (live 2026-09-18, `veo-lite-lp`, 8 s clip). Create the character in Flow's
-  web UI and take its id from there.
-- **Fix needs:** a flow.google.com route for entity create/list — a spike of how the app does it
-  now, then a port.
+  that took `project.createProject` (#864).
+- **Fixed the same day — `character list` and prompt `@mentions`:** on that 404 the listing is
+  read from the flow.google.com project load instead (rpcid `Zzl0ze`, whose payload carries one
+  row per character). Live: `character list` → Tun; `video t2v "@Tun …" --model veo-lite-lp`
+  → exit 0, 8 s clip with the character.
+- **Still broken — `character create`:** no flow.google.com route yet. Create the character in
+  Flow's web UI; `character list` then shows its id, and `@Name` / `--reference-entity` use it.
 
 ### Flow is migrating to `flow.google.com`; generation coverage is partial but includes images
 
