@@ -36,6 +36,7 @@ from gflow_cli.config import get_settings, warn_if_removed_gemini_key_set
 from gflow_cli.observability import DEBUG_LEVEL, configure_logging
 from gflow_cli.update_check import UpdateNotice, maybe_notify_update
 
+logger = structlog.get_logger(__name__)
 console = Console()
 
 
@@ -261,7 +262,12 @@ def _maybe_rename_first_profile(
     help="Browser strategy for login. 'chrome' bypasses Google secure blocks.",
     envvar="GFLOW_CLI_AUTH_BROWSER",
 )
-def auth_login(profile: str | None, browser: str | None) -> None:
+@click.option(
+    "--account",
+    default=None,
+    help="Assert that login authenticates as this exact Google account (email address).",
+)
+def auth_login(profile: str | None, browser: str | None, account: str | None = None) -> None:
     """One-time interactive sign-in. Opens a browser window."""
     from gflow_cli.browser_manager import is_chrome_available
     from gflow_cli.errors import EXIT_CODE_MAP, GFlowError
@@ -284,6 +290,28 @@ def auth_login(profile: str | None, browser: str | None) -> None:
 
     try:
         pdir = asyncio.run(auth_mod.login(name, browser=selected_browser))
+        if account:
+            from gflow_cli.errors import FlowAccountChooserError
+
+            actual_account = profile_store.read_account_file(pdir)
+            if actual_account is None or actual_account.lower() != account.strip().lower():
+                held = actual_account or "nothing recorded"
+                logger.warning(
+                    "auth.account_assert_failed",
+                    # Not the addresses: redact_sensitive_text maps every address to
+                    # one constant, so those two fields were identical tokens and no
+                    # signal, while the console prints both in the clear below. What
+                    # the event can carry is the distinction it exists to make.
+                    held_recorded=actual_account is not None,
+                )
+                raise FlowAccountChooserError(
+                    detail=(
+                        f"Login completed but the profile now holds '{held}', which does not "
+                        f"match required --account '{account}'. Re-run "
+                        f"`gflow auth login --profile {name} --account {account.strip()}` "
+                        f"while signed in as the required account."
+                    )
+                )
     except GFlowError as e:
         console.print(f"[red]{e}[/red]")
         if e.remediation_hint:
@@ -338,6 +366,8 @@ def auth_status(profile: str | None) -> None:
 
     # Files on disk say nothing about whether the session still works — prove
     # it (issue #471). Fail-closed: only a verified session exits 0.
+    from datetime import UTC, datetime
+
     from rich.markup import escape
 
     from gflow_cli.auth import verification
@@ -363,6 +393,18 @@ def auth_status(profile: str | None) -> None:
         sys.exit(1)
     who = f" as [bold]{escape(status_result.user_email)}[/bold]" if status_result.user_email else ""
     console.print(f"[green]Flow session verified{who}.[/green]")
+    # Flow's sessions are short — roughly a day — and nothing else tells the user when the
+    # next 401 is due. The body already carries `expires`; printing it is the difference
+    # between planning a batch run and discovering the deadline halfway through one.
+    if status_result.expires_at is not None:
+        # Keep the cache the run-start pre-flight reads in step with what we just learned.
+        verification.record_session_expiry(auth_mod.profile_dir(name), status_result.expires_at)
+        left = status_result.expires_at - datetime.now(UTC)
+        hours, remainder = divmod(max(int(left.total_seconds()), 0), 3600)
+        console.print(
+            f"[dim]Expires {status_result.expires_at:%Y-%m-%d %H:%M:%S} UTC "
+            f"— {hours}h {remainder // 60}m from now.[/dim]"
+        )
 
 
 @auth.command("list")

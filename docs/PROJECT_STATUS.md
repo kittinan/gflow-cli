@@ -4,7 +4,333 @@
 
 ## Current release
 
-**v0.68.0 — alpha.** **gflow-cli keeps itself current: `gflow update` upgrades an install in
+**v0.73.1 — alpha.** **Google's cookie bar was sitting on the composer, and the error said "span".**
+
+A patch with one cause and two halves, on the migrated `flow.google.com` driver.
+
+**The bar blocks generation** (#780, reported by @stgmt). Google's `glue` consent bar is
+`position: fixed` at `z-index: 1000`, and Flow's composer is bottom-anchored in the same band
+— so the bar lands **on** the settings trigger *and* on the image submit. Measured on
+`ci-probe`: `elementFromPoint` over each returned the bar's label span in 5/5 rendered samples,
+on the same profile and project where the click had landed 3/3 the day before. Every image and
+video run on a re-prompted profile failed, before any submit, so nothing was billed. The driver
+now clears the bar before its first click, and **rejects** rather than accepts — both remove it,
+and only one answers a consent question on the operator's behalf.
+
+The premise was nearly rejected. Both prior sightings of that selector in this repo are
+labs.google, and the 2026-09-10 spike had read 159 DOM samples on this exact host and found
+zero overlays. That spike never looked for a cookie bar, and it was right to record its 0/3 as
+*unmeasured* rather than as transience — it even named "a first visit after a Flow deployment"
+as the state it could not summon. This is that state.
+
+**And the failure could not name it** (#776's follow-up). The occluder allowlist matched
+`cdk|mat|mdc|flow` class prefixes on whatever `elementFromPoint` returned — but a consent bar
+puts an unnamed label span there and keeps its identity in an `id` the allowlist deliberately
+drops. So a blocked user on 0.73.0 got `it is covered by span`. It now adds Google's `glue`
+prefix and climbs to the nearest ancestor that names itself. Because that makes a stuck bar
+self-describing, the dismissal is deliberately best-effort and raises nothing — which is why it
+is about twenty lines rather than ninety.
+
+See [LIVE_VERIFICATION_v0.73.1.md](LIVE_VERIFICATION_v0.73.1.md). Three items are recorded as
+**not** verified: the cure against a live bar outside the browser (the control arm consumed the
+consent on the only profile that had it), how widely it fires (one account blocked, one already
+consented), and the video path live (same function, same control, but it spends Veo credits).
+
+<details><summary>v0.73.0 — four error paths stopped lying about what went wrong</summary>
+
+**v0.73.0 — alpha.** **Four error paths stopped lying about what went wrong.**
+
+Every fix in this release is the same shape: gflow knew something had failed, and blamed the
+wrong thing. None of them changed what the tool can do — they changed what it says when it
+cannot, which is the difference between a user filing a useful bug and re-running blind.
+
+**A click that never lands now reports what was actually true** (#776). On the migrated host
+a run reached `migrated.editor_ready` and died five seconds later as a bare Playwright
+`TimeoutError`: exit 1, no locator, no cause, no file. The control was *visible* — the guard
+above it proves that — and the *click* expired. Two causes were live and **neither could be
+measured**: Flow's announcement overlay (measured on labs.google, never on this host — a
+spike read `body{pointer-events}` as `auto` in 159/159 samples, including while Flow's own
+pane was open) and a mid-run agent-mode flip. So the driver reads Playwright's four
+actionability conditions back and reports the ones that fired; when every reading is healthy
+it **says so**, eliminating three and pointing at the fourth rather than inventing one. The
+MCP surface gains more than the CLI, where the same failure had been arriving as
+`detail: "sha256:…"` — a hash, not even the exception class.
+
+**A known Flow landing page is no longer reported as selector drift** (#756). `flow_host_kind()`
+classifies the *origin*, and `/about`, `/project/<id>` and `/fx/api/auth/signin` all share
+one — so a readiness wait that timed out had nothing left to blame but its own anchor,
+sending the operator to "check for a newer release, then file a bug" over a session state no
+release changes.
+
+**Google's auth URLs no longer reach error messages with their query intact** (#777). Those
+messages are the artifact users are asked to paste into an issue, and Google's auth URLs
+carry `state`, `code_challenge`, `client_id` and challenge tokens. Measured, not theorised:
+a real run printed five secret matches before the fix and **zero** after, with the landing
+still named — knowing *where* the session stopped is the whole value of the message.
+
+**Google's post-migration account chooser no longer stalls a run** (#763/#764, thanks
+@stgmt). gflow now auto-selects the profile's recorded account instead of stalling into an
+opaque exit 1 — with the row match anchored so the chooser's *Remove* and *Sign out* rows can
+never be clicked, and unselectable cases raising a typed exit 38.
+
+Also shipped: **the Bug Lane is now the documented route from symptom to fix** (#774) —
+spike → debug → BDD → TDD → fix → e2e, written once and cited everywhere, with an offline
+guard that fails CI when a browser-only scenario has no e2e test bound to it.
+
+See [LIVE_VERIFICATION_v0.73.0.md](LIVE_VERIFICATION_v0.73.0.md) for what was exercised
+against real Flow — and what was not. Four arms verified live, one in a real browser against
+a page we wrote, and three recorded as **not** verified with named reasons: `/about` stopped
+reproducing (0/5), the `/fx/api/auth/*` landing moved before it could be reached, and #764's
+success path needs an account currently behind a Google password challenge.
+
+</details>
+
+<details><summary>v0.72.0 — auth login closes the browser, and the migrated host generates images</summary>
+
+**v0.72.0 — alpha.** **`gflow auth login` closes the browser for you, and Flow's migrated
+host now generates images.**
+
+Sign-in no longer ends with an instruction. gflow drives your real Google Chrome through
+Playwright, watches for the completed Flow sign-in and closes the window itself; closing it
+yourself still verifies, because that is what three releases of docs told people to do. On a
+machine where Playwright cannot resolve a Chrome channel, or where Google rejects the browser
+anyway, login falls back automatically to the previous subprocess flow — there is no new flag
+and nothing to choose.
+
+That rests on a measured retraction. The standing claim was that Google rejects Playwright's
+bundled Chromium; the 2026-09-08 spike found the discriminator is **`navigator.webdriver`**,
+not the browser binary — real Chrome *without* the stealth flags was rejected at
+`/v3/signin/rejected` in 17.5 s, while bundled Chromium *with* them signed in normally. The
+`bare` control arm is the only reason that concludes anything: with just the two passing arms
+it would have read as "the block is gone".
+
+Four defects surfaced only by driving it live, none of which the offline suite could reach.
+The session poll was hitting Flow's NextAuth session endpoint every 3 s for the whole login —
+including while Google held the page for the OAuth callback — and it now stays off both
+Google's host and NextAuth's own routes, because the callback runs on the *app's* origin and
+a host check sails straight through it. Gating that poll on `labs.google` alone would have
+timed out on every migrated account. And `page.is_closed()` was reachable only from an
+exception handler, so a window closed during a 2FA challenge was never noticed: a full
+ten-minute deadline, session endpoint touched zero times, ending in the wrong error.
+
+`gflow image t2i` and local-file `i2i` also arrive on the migrated `flow.google.com` host
+(#692, @arjhinety), driving Angular Image mode and the page-owned `ogiZ0b` wire — Nano Banana
+2 / Pro, the four aspects measured there, counts 1–4, `--project` required, with the direct
+and queued MCP twins on one payload path. UUID/entity references, Agent instructions, Imagen
+4, `image batch` and the 3:4 aspect stay unported there and are refused before submit with
+exit 36 rather than reported as selector drift.
+
+See [LIVE_VERIFICATION_v0.72.0.md](LIVE_VERIFICATION_v0.72.0.md) for what was exercised
+against real Flow — and what was not. The OAuth-callback *mechanism* is inferred rather than
+proven; issue #769 carries the spike that would settle it.
+
+</details>
+
+<details><summary>v0.71.1 — two migrated-host failures stop blaming the wrong thing</summary>
+
+
+**v0.71.1 — alpha.** **Two migrated-host failures stopped blaming the wrong thing — and
+both were found by asking what the app was *saying*, which this driver had never done.**
+
+An account parked in Flow's **agent mode** gained a recovery earlier in this same release
+(#749), but that first cut collapsed three distinct outcomes into one message: the chip was clicked, the chip
+was found and the click was blocked, the chip was clicked and the mode is still on. All three
+read as *"the chip was clicked to leave it … the mode may be pinned"*. So a modal eating the
+click sent the user to toggle a chip that was never the problem, and genuine selector drift
+**after** the mode was successfully left was filed under an account setting the driver had
+already changed — which is to say, not filed at all. `_exit_agent_mode` now returns a
+tri-state, a blocked click raises at once instead of waiting out the recovery window (worst
+case 55 s → 35 s), and a timed-out recovery re-reads `aria-pressed` before choosing between
+*pinned* and *ordinary drift*. `_open_pane` had the same defect one gate later — it guarded
+with `count()`, and agent mode leaves the trigger present-but-`hidden` — so a mode flip
+mid-run escaped as a bare Playwright timeout with no exit code; it waits on **visibility**
+now.
+
+An account's **first upload** on the migrated host failed with *"no maseQ reply within 60s …
+the upload never reached Flow or was dropped"*, and advised re-encoding the image. Neither the
+file nor the network was involved: Flow shows a one-time **"Rights to use this image"**
+confirmation *after* the chooser hands the file over, and sends nothing until a human accepts
+it — so the driver spent its whole budget waiting for a request the page had already declined
+to make. It is detected by **counting** dialogs across the upload rather than matching one:
+the dialog's two buttons carry no ligature and no data attribute, separable only by DOM order,
+and its copy is translated, so no anchor there satisfies the locale rule — whereas *"a dialog
+appeared between the file being chosen and the wait expiring"* is upload-related by
+construction and cannot rot when Angular renames a class. **gflow does not accept it for you,
+and there is no flag to make it**: it affirms that *you* hold the rights to what you upload,
+it is one-off per account, and the path already requires an interactive `gflow auth login`.
+
+The driver also now watches the upload **request**, not just the response, so *"nothing left
+the page"* and *"it left and Flow did not answer"* are no longer the same message. That
+distinction is load-bearing — the second argues for a retry and the first argues against one.
+
+**Three documents were wrong and are corrected, not quietly patched.** `KNOWN_ISSUES.md` said
+this upload dialog affected "the legacy worker, **NOT gflow-cli itself** … workaround: none
+needed" — true of the REST path, false since the migrated driver began using the editor's own
+upload, and it was the entry a user hitting #719 would find and be reassured by.
+`LIVE_VERIFICATION_v0.71.0` labelled the `ci-probe` profile **labs** when it is migrated,
+contradicting v0.70.0 one day earlier; in a repo where "Flow's UI shows X" is not a fact until
+the host is named, that silently re-scoped every conclusion keyed to it — and it helped make a
+credit-based theory for #719 look plausible for four runs. Two `$0` instruments were added to
+settle such things by measurement: a queue reader (Flow's listing is on `Zzl0ze`, not the
+`jwpduf`/`as29s` progress polls) and an upload-wire probe.
+
+Verification: [LIVE_VERIFICATION_v0.71.1](LIVE_VERIFICATION_v0.71.1.md) — the agent-mode
+recovery A/B run twice against a live account, and the consent guard's full six-run chain
+(guard fires → accept → uploads → never asked again). Recorded as **not** verified: #719's
+second failure shape (an upload request that leaves the page and is never answered, ~1 run in
+4 on a consented account) is unfixed and the issue stays open; and the consent guard's firing
+branch is now **unrepeatable** here, because the dialog is one-off and all three available
+accounts have accepted it.
+
+**Unreleased — the migrated image slice of #639 is implemented and live-verified.**
+`gflow image t2i` and local-file `gflow image i2i` drive the Angular Image mode and the
+page-owned `ogiZ0b` wire on moved accounts (Nano Banana 2 / Pro, the four aspects measured
+there — 16:9, 4:3, 1:1, 9:16 — and counts 1–4, with `--project` required); the direct and
+queued MCP twins share the same payload path. UUID/entity references, Agent instructions,
+Imagen 4, `image batch` and the 3:4 aspect remain unported on that host and are refused
+before submit.
+
+</details>
+
+<details><summary>v0.71.0 — <code>character create --voice</code> verified, and two retractions</summary>
+
+**v0.71.0 — alpha.** **`gflow character create --voice` is verified end to end for the first
+time, and two confident wrong diagnoses shipped and were retracted inside this one release.**
+
+Before v0.71.0 a repo-wide grep for `--voice` across `tests/e2e/` matched **nothing**. Every
+voice test was a unit test of the hardcoded `VOICES` constant, and the one that looked live
+parsed a fixture — so a voice that silently failed to attach was invisible to the whole suite
+while the command exited 0. A live create plus a `character show` read-back now closes that,
+and settles a contradiction between two of our own documents: `sent='Charon' stored='Charon'`,
+so the Capitalized form round-trips and `CHARACTER_RECON.md`'s "the preset id is the lowercased
+name" does not describe today's wire. Both docs also now record that `personalityNotes` is
+**Agent-scoped** — Flow's own editor says the *agent* uses it to craft scenes — so it is not a
+control on the audio engine.
+
+A credit shortfall reports **exit 37** instead of "file a frontend bug", and the actionable
+half is that it is *short for the selected model*, not empty: the measured account held **50**
+credits and asked for `veo-quality`, which costs **100**. Incident bundles are no longer blind
+on the migrated host — the DOM dump queried `i.google-symbols` only, so **every bundle a
+migrated user sent carried an empty ligature list**, which is why #727 and #731 stayed
+invisible. The "+ New project" CTA is anchored structurally on `add` rather than on English
+text.
+
+**Two mistakes and their retractions are both recorded, not just the corrected state.** #739
+asserted the migrated gallery renders no "+ New project" control gflow can drive; a $0 run
+created a project there in one click, and #740 reverts it. Separately the entity guard was
+given the reason "the backend rejects the generation" — entity-bound submissions are in fact
+**accepted and queued** (Flow types them `abra_r2v_8s` and renders them); what fails is the
+**observer**, because `MZZa6b` replies with a null payload and `SUBMIT_REPLY_BUDGET_S` (60 s,
+calibrated on 4.0–4.6 s replies against an idle queue) expires while the video is still
+rendering. The guard stays until that is fixed (#723), because a timeout reported on a healthy
+generation is worse than an honest refusal. Both were unproven negatives overturned by one
+cheap direct observation.
+
+Recorded as **not** verified rather than omitted: whether a bound character's voice reaches
+rendered audio (#738). Attachment is proven; application is not, and the blocker is no longer
+credits or account access but retrieval.
+
+</details>
+
+<details><summary>v0.70.0 — <code>character create</code> on the migrated host</summary>
+
+**v0.70.0 — alpha.** **`gflow character create` works on the migrated `flow.google.com`
+host — it was never broken there; the driver was not driving.**
+
+The character editor is fully present on `flow.google.com`, backed by the **same** labs tRPC
+and aisandbox APIs. Only the view layer differs: labs renders React + **Slate**, the migrated
+host renders Angular + **ProseMirror**. Seven selectors missed, a 20 s readiness gate timed
+out, and the absence of a *match* was recorded as the absence of the *feature* — then hardened
+into a guard that aborted *before* probing the DOM, which made the claim unfalsifiable. A
+complete character now builds end to end on a moved account: name, personality, voice,
+portrait **and** body, with two distinct workflow ids, two distinct media ids and both images
+on disk, verified by independent read-back.
+
+`--model` is now deterministic. The picker was best-effort — every failure logged a warning
+and let the generation run on whatever tier the editor happened to show, so `--model nano2`
+could quietly return a Nano Banana Pro image. It now reads the visible menu, refuses an
+ambiguous match, and **verifies by re-reading the chip** rather than trusting the click.
+Aborting is free: the picker runs before submit, so a refusal costs no quota, while proceeding
+produces a paid artefact from the wrong model.
+
+A failed `character create` no longer strands an "Untitled Character" in the project, and the
+rollback asks the backend before deleting — an empty local workflow list means only that *this
+process* failed to read a result, and on the migrated host a portrait generated fine while the
+client timed out. Each slot also takes its own `primaryMediaId` now; reusing the entity
+thumbnail across slots corrupted the body workflow through `commit_workflow`.
+
+`-o <existing directory>` no longer costs you a clip: exit 2 in 0.8 s instead of exit 1 after
+~2 min with a billed, orphaned mp4.
+
+Spike is now **Phase 0** of the workflow (`/gflow:spike`), with the CDP/HAR harness vendored
+in-tree and CONTRIBUTING telling contributors how to produce **redacted** evidence for a bug
+report.
+
+Verification: [LIVE_VERIFICATION_v0.70.0](LIVE_VERIFICATION_v0.70.0.md) — the complete
+character read back from the backend, `--model` determinism over four alternating runs, and
+the orphan-rollback A/B (1 → 2 entities without the fix, 2 → 2 with it). Recorded as NOT
+verified: the labs.google path for all seven changed anchors, because every account available
+here has been migrated by Google.
+
+</details>
+
+<details><summary>v0.69.0 — i2v on the migrated host, and credits</summary>
+
+**v0.69.0 — alpha.** **The migrated `flow.google.com` host gains image-to-video from a local
+start frame, and gflow can finally tell you what your balance is.**
+
+`gflow credits user` and `gflow credits list` report the current Veo balance and account tier
+for one saved profile or all of them, and `gflow_get_credits` is the MCP twin. The primary
+path is genuinely browser-free: saved cookies authenticate a `labs.google` session request,
+that client is **closed** before a separate cookie-free, Bearer-only call to the credits
+endpoint, so no cookie crosses an origin boundary. A browser is the fallback, not the route.
+Multi-profile inspection keeps partial successes — a stale profile degrades to its own row
+with a reason instead of failing the run — and `--json` is a stable automation contract. The
+balance funds **Veo video only**; image generation draws on separate per-model daily quotas,
+which the docs now say in three places
+([#671](https://github.com/ffroliva/gflow-cli/pull/671), @ziyedbe).
+
+`gflow video i2v --initial-frame <file> --project <id>` now runs on the migrated host
+([#639](https://github.com/ffroliva/gflow-cli/issues/639), slice 1) — on a moved account, and
+by default on an unmoved one. The port is UI-driven and observed rather than replayed: the
+composer picks the Frames submode, uploads through the editor's own toolbar entry, reads the
+media id off the app's `maseQ` reply, finds the upload in the picker by file name (the picker
+exposes no media id in its DOM, and indexes a fresh upload late — hence up to three searches),
+and inspects the submit *request* as it leaves. An unbound chip is refused before the click,
+exit 23 at zero credits, because an empty Frames submit silently goes out as text-to-video.
+Not ported in this slice, and named in the exit-36 detail: `--end-frame`, a frame given by
+UUID or `@Name`, and r2v.
+
+Also in this release: `--model veo-lite-lp` is drivable on the migrated host — the one tier
+its model map omitted, matched by the `[Lower Priority]` tag rather than a label
+([#669](https://github.com/ffroliva/gflow-cli/pull/669), @kittinan); moved accounts now exit
+36 rather than a misleading `RecaptchaError` on `image t2i`/`i2i`/`upscale`/`extend`, because
+the token was minted on the pool's bootstrap page before any transport guard could fire
+([#673](https://github.com/ffroliva/gflow-cli/issues/673)); and three migrated model-picker
+defects are fixed — a tier bound that the user did not ask for, a stacked overlay that broke
+the next run after a `--model` switch, and a short-circuit that logged nothing.
+
+The `video-production` skill ships at **SkillOpt epoch 1**: a scored rollout picked
+`veo-quality` for a two-reference shot while correctly reciting that its reference cap is 0,
+because the skill stated the prohibition twice and the substitute nowhere. It now routes —
+and names `video chain` as the exception, since chains refuse `omni-flash`. The SkillOpt
+harness moved onto the project's own `GFLOW_CLI_LLM_*` settings, dropping a parallel provider
+configuration and both LLM SDK dependencies.
+
+Verification: [LIVE_VERIFICATION_v0.69.0](LIVE_VERIFICATION_v0.69.0.md) — i2v proven on **two
+moved accounts in two locales**, the decisive run being the CLI entrypoint on the
+Portuguese-locale account (exit 0, 64 s, 632,755 B byte-exact with the status record, catalog
+row present); credits re-tested on the maintainer machine that had originally caught it
+launching a browser, now `status_code=200` with no browser and an `e2e_auth` test whose pass
+*is* the browser-free proof. Recorded as NOT verified: 5 of the 19 skill-benchmark tasks
+(blocked on a 20-request/day free-tier quota, not on the code), the MCP twin of the credits
+path live, and the items the i2v ledger already lists.
+
+</details>
+
+<details><summary>v0.68.0 — gflow update, and the once-a-day banner</summary>
+
+**gflow-cli keeps itself current: `gflow update` upgrades an install in
 place, and every command shows a banner when a newer release is on PyPI.**
 
 `gflow update [--check] [--json]` runs the package manager that installed gflow-cli, read
@@ -42,6 +368,8 @@ install's own `gflow.exe`: **exit 0 both times, venv at PyPI 0.67.0 afterwards**
 carrying the stale-launcher note. Recorded as NOT verified: plain-venv `pip` on Windows,
 macOS / Linux for any manager, a real interactive-terminal screenshot of the panel, and the
 first genuine banner (0.68.0 is the first release after the change).
+
+</details>
 
 <details><summary>v0.67.0 — Flow's migrated flow.google.com host driven for text-to-video</summary>
 
@@ -682,6 +1010,13 @@ reporter-verified e2e on macOS).
 
 | Milestone | Status |
 |---|---|
+| Four error paths stop lying about what went wrong: a click that never lands reports the actionability condition that failed instead of a bare timeout (#776), a known Flow landing is named rather than blamed on the selector (#756), Google's auth URLs are stripped from error messages (#777), and the post-migration account chooser auto-selects instead of stalling (#763/#764) | ✅ done (v0.73.0) |
+| Google's `glue` consent bar no longer blocks the migrated composer: it is cleared before the driver's first click, rejecting rather than accepting, and a bar that will not go is named as `div.glue-cookie-notification-bar` instead of `span` (#780) | ✅ done (v0.73.1) |
+| `gflow auth login` closes the sign-in browser itself, on a measured retraction — G12 blocks `navigator.webdriver`, not bundled Chromium (#767); `gflow image t2i`/local-file `i2i` driven on the migrated host (#692) | ✅ done (v0.72.0) |
+| Two migrated-host error paths stop blaming the wrong thing: Flow's agent mode (three distinct outcomes, not one message) and its one-time upload-terms dialog (#749/#752, #719 shape A) | ✅ done (v0.71.1) |
+| `gflow character create --voice` verified end to end for the first time; a credit shortfall reports exit 37; incident bundles no longer blind on the migrated host | ✅ done (v0.71.0) |
+| `gflow character create` driven on the migrated `flow.google.com` host; `--model` made deterministic by chip read-back; spike promoted to Phase 0 of the workflow | ✅ done (v0.70.0) |
+| Read-only credit balance in the CLI and MCP (`gflow credits user` / `list`, `gflow_get_credits`) over a browser-free HTTP path; image-to-video from a local start frame on the migrated `flow.google.com` host (#639 slice 1) | ✅ done (v0.69.0) |
 | `gflow update` self-update through the installing manager (uv tool / pipx / pip), venv-verified outcome; the update notice as a stderr banner; CONTRIBUTING routes contributors and agents through the AGENTS.md lifecycle | ✅ done (v0.68.0) |
 | Flow's migrated `flow.google.com` host driven for text-to-video; the default host for what it can serve (`GFLOW_CLI_FLOW_HOST`) | ✅ done (v0.67.0) |
 | Migrated-origin runs fail fast and keep their learned locale (v0.66.1's fast-fail never fired in the field; corrected in v0.66.2) | ✅ done (v0.66.2) |

@@ -28,8 +28,13 @@ entity {
     entityType: "CHARACTER"
     displayName                  # "Denidra" (default "Untitled Character")
     characterInfo {
-      personalityNotes           # free text — guides actions when not specified in a prompt
-      audioReferences: [ { presetVoiceId: "gacrux" } ]      # voice; preset id is lowercased name
+      personalityNotes           # free text — Flow's editor says the AGENT uses it to craft
+                                 # scenes; NOT a documented input to a composer generation
+      audioReferences: [ { presetVoiceId: "Charon" } ]      # voice; Capitalized id round-trips
+                                 # unchanged (e2e-verified 2026-09-07: sent 'Charon', stored
+                                 # 'Charon'). The earlier "lowercased name" note above this
+                                 # line came from one capture and does NOT hold today; see
+                                 # CHARACTER.md § 7.
       imageReferences: [ { workflowId }, { workflowId } ]   # face + body (point to WORKFLOWS, not media)
     }
   }
@@ -202,7 +207,9 @@ With both fixed, the deep-linked editor binds reliably. See
 - `gflow character rm <id>` → entity delete (capture verb later).
 - Reuse: **`--character <id>` (repeatable → multi-reference)** on `gflow video` → adds
   `referenceEntities:[{entityId}]` to `video:batchAsyncGenerateVideoReferenceImages` (R2V mode, async + poll).
-  Same flag on `gflow image` pending an image-path confirm.
+  Same flag on `gflow image` remains pending on the migrated host: local-file image
+  generation is confirmed, but character/entity binding is intentionally refused until
+  its migrated picker wire is captured.
 
 ## Reuse from PR #123 (kittinan)
 

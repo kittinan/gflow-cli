@@ -20,13 +20,13 @@ import random
 import re
 import secrets
 import time
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 from urllib.parse import urlparse
 
 import structlog
 
 from gflow_cli.api._retry import parse_retry_after
-from gflow_cli.api.character import CHARACTER_MODELS, CharacterImageRequest
+from gflow_cli.api.character import CharacterImageRequest
 from gflow_cli.api.dto import BatchSubmissionResult, GeneratedImage
 from gflow_cli.api.image import Aspect, GenerateImageRequest, Model
 from gflow_cli.api.transports._common import (
@@ -36,8 +36,12 @@ from gflow_cli.api.transports._common import (
     extract_project_id,
     flow_host_kind,
     generation_error,
+    migrated_route,
     offered_menu_labels,
+    raise_if_known_landing,
+    raise_if_migrated,
 )
+from gflow_cli.api.transports.migrated_composer import MENU_ITEM, ModelMenuMatcher
 from gflow_cli.api.transports.ui_automation_video import (
     ENTITY_ATTACH_DRIFT_HINT,
     MODE_SWITCH_TRIGGER_SELECTORS,
@@ -49,6 +53,7 @@ from gflow_cli.api.transports.ui_automation_video import (
 from gflow_cli.errors import (
     AuthExpiredError,
     BatchPartialError,
+    ConfigurationError,
     ContentPolicyError,
     FlowAppError,
     GFlowError,
@@ -99,8 +104,14 @@ _PROJECT_URL_FRAGMENT = "/project/"
 # 'Nano Banana Pro', so has-text is unambiguous across the three.
 # Tier 1 (structural) slots are reserved for data-* / aria-* anchors once a DOM
 # probe via scripts/dev/capture_locale_invariants.py confirms stable attributes.
+# Class-only carrier anchor (#730): `.google-symbols` matches the labs `<i>` AND the
+# migrated `<mat-icon>`, which both carry the class — verified against a real CSS engine in
+# tests/api/transports/test_ligature_carrier.py. The tag-qualified form matched ZERO on the
+# migrated host, and this constant has neither a carrier twin nor a text fallback, so the
+# miss was total and silent: the picker is best-effort, so generation simply proceeded on
+# whatever tier the editor happened to open at.
 IMAGE_MODEL_PICKER_TRIGGER = (
-    "button[aria-haspopup='menu']:has(i.google-symbols:text-is('arrow_drop_down'))"
+    "button[aria-haspopup='menu']:has(.google-symbols:text-is('arrow_drop_down'))"
 )
 # Verified live 2026-08-26 (menu read WHILE OPEN, profile denon82):
 #   ['Nano Banana Pro', 'Nano Banana 2', 'Nano Banana 2 Lite']
@@ -231,38 +242,78 @@ PROMPT_INPUT_SELECTORS = (
 # The ``arrow_forward`` ligature is a Material Symbols icon name (not a UI
 # label), so it renders identically regardless of the Chrome profile locale.
 # Use :text() inside :has() (not :has-text() which is invalid inside :has()).
+# Class-only carrier anchor (#730). `.google-symbols` covers the labs `<i>` and the migrated
+# `<mat-icon>` alike — both carry the class, verified against a real CSS engine in
+# tests/api/transports/test_ligature_carrier.py.
+#
+# This cascade was WORKING BY LUCK on the migrated host. Entries 0 and 1 were tag-qualified
+# and matched nothing there; the submit only ever landed because entry 2 matches the
+# `<mat-icon>`'s *text*. Observed live 2026-09-07:
+# `prompt_submitted via="button:has-text('arrow_forward')"`. Two misses at ~2s each were
+# paid on every submit before the fallback rescued it.
+#
+# The old `button:has(i:text(...))` entry is deleted, not kept: with entry 0 class-only it is
+# strictly dominated — anything a bare `<i>` carrying that text could match, the class-only
+# form matches too, and an `<i>` WITHOUT the class is not an icon carrier.
+# `:text-is` (exact), NOT `:text` (substring). The old entry was
+# `i.google-symbols:text('arrow_forward')`, whose substring match also accepts
+# `arrow_forward_ios` — a real Material Symbol. The `<i>` qualifier happened to contain that
+# on labs; dropping it for the class-only carrier made the over-match reachable, and the
+# two-carrier fixture caught it as `matched 3 of 2` before it ever ran live. Same trap as
+# `:text('upload')` accepting `drive_folder_upload` ([[flow-locale-leak-icon-ligatures]]).
 SUBMIT_BUTTON_SELECTORS = (
-    "button:has(i.google-symbols:text('arrow_forward'))",
-    "button:has(i:text('arrow_forward'))",
+    "button:has(.google-symbols:text-is('arrow_forward'))",
     "button:has-text('arrow_forward')",
 )
 
 # Prompt-format button in the character editor ("Format" in EN) — rewrites the
 # typed prompt into Flow's character prompt-engineering shape.
 #
-# Live DOM, verified 2026-07-27 via ``scripts/dev/spike_character_prompt_format.py``
-# against a fresh entity's editor:
+# Live DOM, two frontends, two captures by scripts/dev/spike_character_prompt_format.py:
 #
-#   <button type="button" disabled="">
-#     <i class="… google-symbols …">personal_recommendations</i><span>Format</span>
-#   </button>
+#   labs      2026-07-27:  <button disabled>
+#                            <i class="... google-symbols ...">personal_recommendations</i>
+#                            <span>Format</span></button>
+#   migrated  2026-09-07:  <flow-format-prompt-button>
+#                            <button ... aria-label="Formatar">
+#                              <mat-icon class="... google-symbols ...">
+#                                personal_recommendations</mat-icon>
+#                              <span>Formatar</span></button></flow-format-prompt-button>
 #
-# Three things that dump settled:
-#  1. The ligature IS ``personal_recommendations`` (1 match, unique in the editor).
-#  2. There is NO aria-label — the label is a ``<span>`` child, so an
-#     ``[aria-label*=Format]`` selector matches nothing at all.  The EN fallback has
-#     to be structural (``span:text-is('Format')``), and it is a fallback only:
-#     Flow localises that span to the Chrome *profile* language, which is the
-#     incident-#56 failure mode ([[flow-locale-leak-icon-ligatures]]).
-#  3. The button ships ``disabled`` while the prompt box is empty — see
-#     :meth:`UiAutomationTransport.format_character_prompt` for why that matters.
+# Same ligature, different carrier tag (`<i>` vs `<mat-icon>`) — and the label is
+# localised on both, so it is never an anchor. Hence: custom element first, then the
+# ligature under either carrier. Full evidence, including why the EN `span:text-is`
+# fallback was deleted rather than translated, in
+# docs/superpowers/spikes/2026-09-07-character-format-button-anchor.md.
 #
-# ``:text()`` not ``:has-text()`` (invalid inside ``:has()``); ``text-is`` exact
-# match so a longer ligature cannot partial-match.
+# The button ships `disabled` while the prompt box is empty (both hosts) — see
+# :meth:`UiAutomationTransport.format_character_prompt` for why that matters.
+#
+# `:text()` not `:has-text()` (invalid inside `:has()`); `text-is` exact match so a
+# longer ligature cannot partial-match.
+# Observed-rewrite gate for the Format button (#727). Flow rewrites SERVER-SIDE:
+# measured 2026-09-07 on the migrated host, the reshaped text reached the composer
+# at ~5.4s. The budget is deliberately generous rather than fitted to that single
+# sample -- the costs are asymmetric. Too long is bounded latency on an opt-in flag
+# whose expiry falls back to exactly the old behaviour; too short silently
+# reintroduces the bug, invisibly, which is what shipped. `elapsed_ms` is logged on
+# every success so a real distribution accrues in production instead of being
+# guessed here from n=1.
+_FORMAT_REWRITE_TIMEOUT_S = 30.0
+# Jittered, like every other wait in this module: a fixed cadence is a
+# deterministic signature in front of Google's anti-bot stack.
+_FORMAT_REWRITE_POLL_MS = 250
+# Slate/ProseMirror re-render and normalise whitespace, so a bare `!=` fires on
+# churn. Normalisation moves the length by a handful of characters; the observed
+# rewrite moved it by 632 (19 -> 651). 16 sits far above the former and far below
+# the latter.
+_FORMAT_REWRITE_MIN_DELTA = 16
+
 PROMPT_FORMAT_SELECTORS: tuple[str, ...] = (
+    "flow-format-prompt-button button",
+    "button:has(mat-icon:text-is('personal_recommendations'))",
     "button:has(i.google-symbols:text-is('personal_recommendations'))",
     "button:has(i:text-is('personal_recommendations'))",
-    "button:has(span:text-is('Format'))",
 )
 
 # Self-contained, locale-independent triptych instruction for body generation.
@@ -295,12 +346,35 @@ _BODY_SLOT_MOUNT_POLL_MS = 250
 # only — anchoring prevents matching e.g. "+ Filter" or "+ Add member" rows
 # that contain extra words.  Text variants are ordered by onboarding-locale
 # list (same 14 as ``ONBOARDING_SELECTORS``).
+#
+# LABS-ONLY BY MEASUREMENT, not by intent. The migrated `flow.google.com` frontend renders
+# the ligature `add` and renders `add_2` NOWHERE — composer add=1/add_2=0, editor
+# add=2/add_2=0, per-surface controls passing (2026-09-07,
+# docs/superpowers/spikes/2026-09-07-ligature-carrier-and-name-drift.md). This is a ligature
+# NAME drift, not the carrier split #730 fixed, so adding a `mat-icon` twin would not help.
+#
+# It is harmless today only because no migrated path reaches here: `migrated_can_serve`
+# refuses without a `project_id`, `ensure_editor` navigates straight to the project URL, and
+# `character create` requires `--project`. Those guards are what a future port relaxes — so
+# `_enter_editor` now names the host rather than blaming this cascade when it is reached.
 NEW_PROJECT_SELECTORS = (
     # Tier 1 — structural / icon: locale-invariant.
-    "button:has(i.google-symbols:text('add_2'))",
-    "button:has(i:text('add_2'))",
-    "[role='button']:has(i.google-symbols:text('add_2'))",
-    r"button:text-matches('^\+\s+\S+$', 'i')",
+    # The migrated `flow.google.com` gallery renders the CTA with the ligature **`add`**,
+    # under a `<mat-icon>`, and renders `add_2` nowhere on that surface (measured
+    # 2026-09-07, denon82, control 47 ligature nodes). Class-only so one entry covers both
+    # carriers. Listed FIRST because without it every Tier-1 entry below misses there and
+    # the CTA survives only on the English text fallback — which is the anti-pattern this
+    # tier exists to avoid, and which fails outright on a non-EN migrated profile.
+    "button:has(.google-symbols:text-is('add'))",
+    "[role='button']:has(.google-symbols:text-is('add'))",
+    "button:has(.google-symbols:text-is('add_2'))",
+    "[role='button']:has(.google-symbols:text-is('add_2'))",
+    # `button:text-matches('^\+\s+\S+$', 'i')` used to sit here. It is not a valid
+    # Playwright selector and RAISES on every evaluation — measured twice against the live
+    # gallery, both runs `ERR Error`. `except Exception: continue` in the sweep swallowed
+    # that, so it has never matched anything on any host while costing a round trip per
+    # attempt. Deleted rather than repaired: the `add` anchor above is what the "+ <word>"
+    # regex was reaching for, and it is structural rather than a text shape.
     # Tier 2 — localised text: 14 locales (EN / PT / ES / FR / DE / IT / NL /
     # JA / ZH / KO / PL / RU / TR / ID).
     "button:has-text('New project')",  # EN
@@ -881,6 +955,15 @@ class UiAutomationTransport(VideoGenerationMixin):
         self._page: Page | None = None
         self._setup_done: bool = False
         self._owns_playwright: bool = False
+        # Latches once this transport has seen Flow serve the migrated host. The
+        # handoff is a server-assigned per-account boolean applied on every load,
+        # so it does not flip back mid-session — and the image path parks the page
+        # on about:blank after every run, which reads back as `labs`. Without the
+        # latch the SECOND image in one client session mints on the labs path and
+        # dies with the RecaptchaError of #673, i.e. the exact bug the page-owned
+        # mint exists to fix. Reachable from `gflow image batch`, which runs every
+        # prompt through one FlowApiClient (image_batch.py::_run_sequential).
+        self._served_migrated_host: bool = False
         # Cross-process profile lease (D3). Held ONLY on the standalone-context
         # path (setup with page=None), where this transport owns the persistent
         # context. On the shared-page path the caller (FlowApiClient) owns both
@@ -1522,7 +1605,23 @@ class UiAutomationTransport(VideoGenerationMixin):
             except Exception:
                 continue
 
+        # Before blaming the anchor, ask the prior question: is this the gallery at all?
+        # NextAuth mounts Flow's OAuth routes on labs.google itself, so a signed-out
+        # session sits at `/fx/api/auth/signin?error=Callback` and passes every host
+        # check this file makes — `auth/internal_chromium.py` has known that since #767;
+        # no transport could see it. The 2026-09-10 RED canary is this exact page,
+        # reported as a missing CTA. Consulted only HERE, after the sweep has already
+        # run: an early bail would delete the DOM evidence that corrects a wrong
+        # absence claim, which is how #739 shipped one (see the note below).
+        raise_if_known_landing(page, requested="the Flow gallery", at="labs.enter_editor")
+
         shot_path = await _capture_debug_screenshot(page, out_dir, "debug_new_project.png")
+        # NO migrated-host branch here. #739 added one asserting that
+        # flow.google.com "renders no '+ New project' control gflow can drive". That was an
+        # UNPROVEN NEGATIVE, generalised from a sweep of two other surfaces, and a live run
+        # disproved it in one click: the CTA is there, carries the `add` ligature, and the
+        # Tier-1 entry above now matches it. Reaching this line on a migrated host means the
+        # anchor missed — which is selector drift, exactly what the message says.
         msg = (
             f"Could not find 'New project' CTA on Flow gallery. "
             f"URL: {page.url}.{screenshot_clause(shot_path)}"
@@ -1601,6 +1700,14 @@ class UiAutomationTransport(VideoGenerationMixin):
             except Exception:
                 continue
 
+        # The third site, and the worst of the three. `_enter_editor(project_id=...)`
+        # has no readiness gate of its own — it navigates, settles, checks overlays and
+        # returns — so a landing page passes all of it and the FIRST thing to fail is
+        # this sweep. It raises a bare RuntimeError, which `observability.py` SHA-256
+        # hashes because it is not a GFlowError, so the operator is shown "Unexpected
+        # error" with even the URL destroyed. Worse than the drift report #756 is about.
+        raise_if_known_landing(page, requested="the Flow editor", at="labs.locate_prompt_box")
+
         shot_path = await _capture_debug_screenshot(page, out_dir, "debug_prompt_not_found.png")
         msg = f"Prompt input not found in Flow UI. URL: {page.url}.{screenshot_clause(shot_path)}"
         raise RuntimeError(msg)
@@ -1624,40 +1731,155 @@ class UiAutomationTransport(VideoGenerationMixin):
         log.info("ui_automation.prompt_submitted", via="enter_key_fallback")
         await page.keyboard.press("Enter")
 
-    async def format_character_prompt(self, page: Page) -> bool:
-        """Click Flow's prompt-format button, trying selectors in priority order.
+    async def format_character_prompt(
+        self,
+        page: Page,
+        *,
+        prompt_box: Any,
+        typed_text: str,
+    ) -> bool:
+        """Click Flow's Format button and WAIT for the rewrite to actually land.
 
         Best-effort, like :meth:`_select_character_model`: formatting is a nicety
-        on top of a prompt that already submits fine, so a missing button logs a
-        warning and returns ``False`` rather than failing the generation.
+        on top of a prompt that already submits fine, so every failure logs and
+        returns ``False`` rather than failing the generation. Callers submit
+        regardless — which is why the return value must not lie.
 
-        The enabled check is NOT redundant with the visible check.  Flow ships this
+        **Returning ``True`` means the composer's text changed, not that a button
+        was pressed.** Flow rewrites *server-side*: measured 2026-09-07 on the
+        migrated host, the click fires a ``batchexecute`` round trip and the
+        reshaped text reaches the composer at **~5.4 s**, while this method used to
+        wait ``_jitter_ms(500)`` and return. ``_send_prompt`` submits on the very
+        next line, so ``--format-prompt`` shipped the prompt the user typed and
+        discarded the rewrite — on every run, with ``prompt_formatted`` logged and
+        exit 0. The defect was never the duration. It was reporting a success we
+        had not observed: the absence of a completion inside a window we chose,
+        recorded as a completion. See
+        ``docs/superpowers/spikes/2026-09-07-format-click-is-not-a-format.md``.
+
+        The gate is the DOM, not the wire. ``eAenfb``'s response arrives **4.2 s
+        before** the text settles, so awaiting it would reproduce the same early
+        submit — and an undocumented ``batchexecute`` rpcid is not an anchor this
+        project is willing to depend on. Comparing the box against the string we
+        inserted is locale-invariant by construction: it never reads a display label.
+
+        A **length delta** rather than ``!=`` because Slate/ProseMirror re-render
+        and normalise whitespace; bare inequality would fire on that churn and
+        re-report the same false success with better telemetry.
+
+        The enabled check is NOT redundant with the visible check. Flow ships this
         button ``disabled`` while the prompt box is empty (verified 2026-07-27), and
         a disabled button is still *visible* — so visibility alone would hand a
         disabled element to ``click()``, which auto-waits for actionability and
-        stalls for the full timeout before failing.  Callers invoke this only after
-        inserting prompt text, so a disabled button here means the editor has not
-        settled: skip it rather than block the submit behind a doomed wait.
+        stalls for the full timeout. A disabled match means THAT anchor resolved to
+        the wrong element, so the cascade continues rather than aborting: the old
+        ``return False`` here let one stale anchor kill every selector behind it.
         """
+        button = await self._locate_format_button(page, prompt_box=prompt_box)
+        if button is None:
+            log.warning("ui_automation.format_button_not_found", selectors=PROMPT_FORMAT_SELECTORS)
+            return False
+
+        locator, selector = button
+        try:
+            # Explicit short timeout: never inherit Playwright's 30s default on
+            # a best-effort nicety sitting in front of the submit.
+            await locator.click(timeout=5000)
+        except Exception as e:
+            log.warning("ui_automation.format_click_failed", selector=selector, error=str(e))
+            return False
+        log.info("ui_automation.format_button_clicked", selector=selector)
+
+        typed = typed_text.strip()
+        deadline = time.monotonic() + _FORMAT_REWRITE_TIMEOUT_S
+        started = time.monotonic()
+        while time.monotonic() < deadline:
+            await page.wait_for_timeout(_jitter_ms(_FORMAT_REWRITE_POLL_MS))
+            try:
+                current = (await prompt_box.inner_text()).strip()
+            except Exception as e:
+                log.debug("ui_automation.format_readback_failed", error=str(e))
+                continue
+            # GROWTH, not absolute delta. `abs()` accepted change in either direction, and
+            # Flow CLEARS the box before repopulating it — so a poll landing in that window
+            # read "" and `abs(0 - 19) >= 16` passed. `prompt_formatted` then logged
+            # `prompt_len_after=0` and `_click_submit` ran on the next line, submitting an
+            # EMPTY prompt on a path that spends image quota (#745). A success signal that
+            # fires on the ABSENCE of the thing it measures is the defect #727 was about,
+            # rebuilt inside its own fix.
+            if len(current) < len(typed) + _FORMAT_REWRITE_MIN_DELTA or current == typed:
+                continue
+            # And confirm it settled. One read can land mid-write; the rewrite observed live
+            # was a single discrete swap, but that was sampled at 250ms and a partial write
+            # between samples was never ruled out. Two agreeing reads cost one interval.
+            await page.wait_for_timeout(_jitter_ms(_FORMAT_REWRITE_POLL_MS))
+            try:
+                settled = (await prompt_box.inner_text()).strip()
+            except Exception as e:
+                log.debug("ui_automation.format_readback_failed", error=str(e))
+                continue
+            if settled != current:
+                log.debug("ui_automation.format_still_settling", chars=len(settled))
+                continue
+            # Lengths and a stable hash only. Flow ELABORATES a terse description into a
+            # detailed physical one, so the rewrite is more PII-dense than the input, and
+            # structlog is not governed by GFLOW_CLI_HISTORY_PROMPTS — no operator control
+            # would apply to it.
+            log.info(
+                "ui_automation.prompt_formatted",
+                selector=selector,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                prompt_len_before=len(typed),
+                prompt_len_after=len(current),
+                prompt_hash=_prompt_hash_stable(current),
+            )
+            return True
+
+        # Say what was observed, never what Flow "failed" to do: an unchanged box
+        # also covers Flow declining, erroring, or judging the prompt already
+        # formatted. None of those were provoked (2026-09-07), so none are claimed.
+        log.warning(
+            "ui_automation.format_not_observed",
+            selector=selector,
+            waited_s=_FORMAT_REWRITE_TIMEOUT_S,
+            prompt_len=len(typed),
+        )
+        return False
+
+    async def _locate_format_button(self, page: Page, *, prompt_box: Any) -> Any:
+        """Resolve the Format button belonging to the ACTIVE composer.
+
+        Returns ``(locator, selector)`` or ``None``.
+
+        Box identity matters here. :meth:`_locate_body_prompt_box` documents that
+        on a two-box cohort "the LAST mounted box is the target" — the body
+        composer, never the portrait's. A page-global ``.first`` on the format
+        button therefore resolves to the PORTRAIT composer's button while the body
+        prompt is the one that was just typed into, reshaping the wrong prompt (or
+        finding a disabled button and giving up). This mirrors that existing
+        convention rather than inventing a second one: when more than one prompt
+        box is mounted, take the last matching button.
+        """
+        try:
+            boxes = await page.locator(self._CHARACTER_EDITOR_READY_SELECTOR).count()
+        except Exception:
+            boxes = 1
         for selector in PROMPT_FORMAT_SELECTORS:
             try:
-                locator = page.locator(selector).first
-                if not await locator.is_visible(timeout=1000):
+                matches = page.locator(selector)
+                locator = matches.last if boxes > 1 else matches.first
+                # No timeout argument: Playwright documents it as ignored here —
+                # `is_visible()` never waits, it answers from the current DOM, so a
+                # non-matching entry costs one round trip rather than a second.
+                if not await locator.is_visible():
                     continue
                 if not await locator.is_enabled():
-                    log.warning("ui_automation.format_button_disabled", selector=selector)
-                    return False
-                # Explicit short timeout: never inherit Playwright's 30s default on
-                # a best-effort nicety sitting in front of the submit.
-                await locator.click(timeout=5000)
-                await page.wait_for_timeout(_jitter_ms(500))
-                log.info("ui_automation.prompt_formatted", selector=selector)
-                return True
+                    log.debug("ui_automation.format_button_disabled", selector=selector)
+                    continue
+                return (locator, selector)
             except Exception as e:
                 log.debug("ui_automation.format_selector_failed", selector=selector, error=str(e))
-
-        log.warning("ui_automation.format_button_not_found", selectors=PROMPT_FORMAT_SELECTORS)
-        return False
+        return None
 
     async def _send_prompt(
         self,
@@ -1697,7 +1919,10 @@ class UiAutomationTransport(VideoGenerationMixin):
         await page.wait_for_timeout(_jitter_ms(500))
 
         if format_prompt:
-            await self.format_character_prompt(page)
+            # The bound box and the exact string we inserted — the rewrite is only
+            # detectable against a baseline we know landed, and holding that baseline
+            # on `self` would couple it across generations on a reused page.
+            await self.format_character_prompt(page, prompt_box=input_box, typed_text=prompt_text)
 
         await self._click_submit(page)
 
@@ -1765,13 +1990,23 @@ class UiAutomationTransport(VideoGenerationMixin):
             prompt_len=len(full_prompt),
         )
         if format_prompt:
-            await self.format_character_prompt(page)
+            # `input_box` is the BODY composer, bound by _locate_body_prompt_box —
+            # passing it is what keeps the format click off the portrait's box on a
+            # two-box cohort.
+            await self.format_character_prompt(page, prompt_box=input_box, typed_text=full_prompt)
 
         await self._click_submit(page)
 
     async def _count_character_prompt_boxes(self, page: Page) -> int:
-        """Count Slate prompt boxes (legacy body-mode baseline)."""
-        return int(await page.locator(PROMPT_INPUT_SELECTORS[0]).count())
+        """Count the editor's prompt boxes (legacy body-mode baseline).
+
+        Counts through the SAME anchor the readiness gate accepts, so both
+        frontends are seen: labs mounts Slate, flow.google.com mounts
+        ProseMirror. Counting only Slate reported 0 boxes on the migrated host
+        and aborted the body step with "Body prompt box did not mount" — on an
+        editor whose box was mounted and visible the whole time (2026-09-06).
+        """
+        return int(await page.locator(self._CHARACTER_EDITOR_READY_SELECTOR).count())
 
     async def _locate_body_prompt_box(
         self,
@@ -1794,7 +2029,8 @@ class UiAutomationTransport(VideoGenerationMixin):
         cohorts mount a second box, so their count must exceed
         ``boxes_before``. In either case the LAST mounted box is the target.
         """
-        loc = page.locator(PROMPT_INPUT_SELECTORS[0])
+        # Both frontends' anchors — see _count_character_prompt_boxes.
+        loc = page.locator(self._CHARACTER_EDITOR_READY_SELECTOR)
         deadline = time.monotonic() + _BODY_SLOT_MOUNT_TIMEOUT_S
         count = int(await loc.count())
         required_count = 0 if shared_body_box else boxes_before
@@ -1813,7 +2049,7 @@ class UiAutomationTransport(VideoGenerationMixin):
             msg = (
                 f"Body prompt box did not mount within "
                 f"{_BODY_SLOT_MOUNT_TIMEOUT_S:.0f}s after body-mode activation "
-                f"(Slate boxes: {count}, before slot-add: {boxes_before}). "
+                f"(prompt boxes: {count}, before slot-add: {boxes_before}). "
                 f"The body-mode settle check reported that {settle_signal}. "
                 "Typing now would land in the portrait prompt box and "
                 "overwrite the stored portrait prompt — aborting the body "
@@ -1882,7 +2118,10 @@ class UiAutomationTransport(VideoGenerationMixin):
         sentinel = _BODY_TRIPTYCH_PREAMBLE[:24]
         try:
             target_text = str(await input_box.inner_text() or "")
-            boxes = page.locator(PROMPT_INPUT_SELECTORS[0])
+            # Readiness anchor, not the Slate-only selector: on the migrated
+            # editor the latter counts 0 boxes, so the portrait-overwrite guard
+            # below silently compared against an empty string.
+            boxes = page.locator(self._CHARACTER_EDITOR_READY_SELECTOR)
             box_count = int(await boxes.count())
             portrait_text = str(await boxes.first.inner_text() or "") if box_count > 1 else ""
         except Exception as e:
@@ -2254,7 +2493,13 @@ class UiAutomationTransport(VideoGenerationMixin):
                     }
                 }
                 // Google Symbols icons present anywhere — gives us the ligature names Flow uses.
-                const _gsQuery = 'i.google-symbols, span.google-symbols';
+                // Class-only, NOT tag-qualified. This query used to read
+                // 'i.google-symbols, span.google-symbols' and therefore returned ZERO on the
+                // migrated host, where every ligature rides a <mat-icon>. The instrument we
+                // reach for to diagnose selector drift was blind to the host the drift lives
+                // on — which is why #727 and #731 stayed invisible, and why an incident
+                // bundle from a migrated user reported no ligatures at all (#730).
+                const _gsQuery = '.google-symbols';
                 for (const el of document.querySelectorAll(_gsQuery)) {
                     const lig = (el.innerText || '').trim();
                     if (lig) result.google_symbols_ligatures.push({
@@ -2793,6 +3038,29 @@ class UiAutomationTransport(VideoGenerationMixin):
                 request, project_id=project_id, name_resolver=name_resolver
             )
 
+    def uses_page_owned_image_recaptcha(self) -> bool:
+        """Whether this run will let the migrated page own token mint + submit.
+
+        Kept as a narrow optional transport capability rather than changing every
+        strategy protocol: only UI automation can observe a page-owned request.
+
+        Answers from the LATCH as well as the current URL. Reading `page.url`
+        alone was wrong in a way no single-image test could see: every migrated
+        image run ends by parking the page on ``about:blank`` (see
+        ``_generate_images_locked``), which routes as ``labs``, so a second image
+        on one warm client fell back to minting on the labs bootstrap page — the
+        #673 failure this capability exists to prevent.
+        """
+        if self._page is None:
+            return self._served_migrated_host
+        from gflow_cli.config import get_settings  # noqa: PLC0415
+
+        route = migrated_route(self._page.url, get_settings().flow_host)
+        if route in {"migrated", "blocked"}:
+            self._served_migrated_host = True
+            return True
+        return self._served_migrated_host
+
     async def _generate_images_locked(
         self,
         request: GenerateImageRequest,
@@ -2808,10 +3076,34 @@ class UiAutomationTransport(VideoGenerationMixin):
         page: Page = self._page  # type: ignore[assignment]  # guard in caller
         out_dir = self._out_dir
 
-        await self._enter_editor(page, out_dir, project_id=project_id)
-        # Dismiss any Flow changelog / "What's new" overlay that may be on top
-        # of the editor before we click into settings / submit (#26).
-        await self._dismiss_blocking_overlays(page, out_dir)
+        from gflow_cli.api.transports.migrated_composer import run_images  # noqa: PLC0415
+        from gflow_cli.config import get_settings  # noqa: PLC0415
+
+        flow_host = get_settings().flow_host
+        route = migrated_route(page.url, flow_host)
+        if route == "labs":
+            await self._enter_editor(page, out_dir, project_id=project_id)
+            # Dismiss any Flow changelog / "What's new" overlay that may be on top
+            # of the editor before we click into settings / submit (#26).
+            await self._dismiss_blocking_overlays(page, out_dir)
+            route = migrated_route(page.url, flow_host)
+        if route in {"migrated", "blocked"}:
+            self._served_migrated_host = True
+        if route == "blocked":
+            raise_if_migrated(page, at="image_flow_host_kill_switch")
+        if route == "migrated":
+            try:
+                return await run_images(page, request, project_id=project_id)
+            finally:
+                # Park off the project so the next borrower of this page does not
+                # inherit a mounted composer. The URL is therefore NOT a reliable
+                # record of which host served us — `_served_migrated_host` above
+                # is, and `uses_page_owned_image_recaptcha` reads that latch.
+                try:
+                    await page.goto("about:blank", wait_until="commit", timeout=5_000)
+                    await self._settle_if_redirecting(page)
+                except Exception as exc:  # noqa: BLE001 - parking is best-effort
+                    log.warning("migrated.image_page_park_failed", error=str(exc)[:120])
 
         # Determine the arm this command REQUIRES: explicit --ui-mode / env, or
         # inferred — agent instructions (-i) are an agentic-only surface, so they
@@ -3044,6 +3336,11 @@ class UiAutomationTransport(VideoGenerationMixin):
             raise RuntimeError(
                 msg,
             )
+        # The batch path drives labs selectors only — `run_images` is the single-image
+        # port. Without this it ran those selectors against flow.google.com and failed
+        # as selector drift (exit 23), blaming a frontend that was fine. Refuse before
+        # any submit so the user gets the non-retryable exit 36 and the real reason.
+        raise_if_migrated(self._page, at="image_batch_unported")
         async with self._generate_lock:
             return await self._generate_images_batch_locked(
                 prompts=prompts,
@@ -3351,10 +3648,20 @@ class UiAutomationTransport(VideoGenerationMixin):
     # ------------------------------------------------------------------
 
     # Selector for the character editor's Slate prompt textbox — used as the
-    # "editor mounted" readiness anchor.  This IS PROMPT_INPUT_SELECTORS[0];
+    # "editor mounted" readiness anchor.  Its first alternative IS
+    # PROMPT_INPUT_SELECTORS[0];
     # duplicated here as a named constant so the character-editor path is
     # self-documenting without importing the tuple.
-    _CHARACTER_EDITOR_READY_SELECTOR = 'div[role="textbox"][data-slate-editor="true"]'
+    # Two frontends, one feature. labs.google renders the character editor with
+    # React + Slate; flow.google.com renders the SAME editor — same tRPC backend,
+    # same aisandbox REST, same entities — with Angular + ProseMirror (recon
+    # 2026-09-06, scripts/dev/spike_migrated_character_editor_anchor.py). Asking
+    # only for Slate made a present feature look absent for 20 s and then get
+    # reported as "labs-only, ever", which was wrong. Both anchors are library
+    # build artefacts rather than display strings, so neither translates.
+    _CHARACTER_EDITOR_READY_SELECTOR = (
+        'div[role="textbox"][data-slate-editor="true"], div.ProseMirror[contenteditable="true"]'
+    )
 
     # Slot-add button for character image slots 1+ (body / accessories).
     #
@@ -3382,7 +3689,13 @@ class UiAutomationTransport(VideoGenerationMixin):
     # [[flow-locale-leak-icon-ligatures]] — it may only serve as a positional
     # hint.  ``text-is`` (exact match) is used so partial-ligature collisions
     # (e.g. ``add_2_box``) cannot match.
-    _CHARACTER_SLOT_ADD_SELECTOR = "[role='button']:has(i.google-symbols:text-is('add_2'))"
+    #: Both ligature carriers: labs uses `<i class="google-symbols">`, the migrated
+    #: Angular frontend uses `<mat-icon>`. Anchoring on one host's carrier is what
+    #: made the whole character surface look absent on the other (2026-09-06).
+    _CHARACTER_SLOT_ADD_SELECTOR = (
+        "[role='button']:has(i.google-symbols:text-is('add_2')), "
+        "[role='button']:has(mat-icon:text-is('add_2'))"
+    )
     # The exact ligature an icon-only slot-add candidate's inner_text reduces to.
     _CHARACTER_SLOT_ADD_LIGATURE = "add_2"
 
@@ -3391,12 +3704,38 @@ class UiAutomationTransport(VideoGenerationMixin):
     # language-independent ``accessibility_new`` icon activates body mode; the
     # generated-face reference chip (image + ``cancel`` icon) proves the mode
     # transition settled before the shared prompt box is safe to edit.
+    #: Stays SCOPED on both hosts. The project-level "Characters" navigation control
+    #: carries the same ``accessibility_new`` ligature, so a bare selector activates
+    #: navigation instead of body mode.
+    #:
+    #: labs scopes it as the sibling of the portrait image button. The migrated
+    #: editor gives us something better: each slot control is wrapped in its own
+    #: ``<flow-slot-chip-button>`` custom element (recon 2026-09-06,
+    #: ``scripts/dev/spike_migrated_character_body_controls.py``), which is a
+    #: component boundary rather than a layout accident — the navigation control is
+    #: not a slot chip, so it cannot match. The migrated host has **no** ``add_2``
+    #: control at all; body mode is entered through this chip directly.
+    #:
+    #: The chip ships ``disabled`` until a portrait exists, which is why callers
+    #: must wait for it to become enabled rather than clicking on sight.
     _CHARACTER_BODY_MODE_SELECTOR = (
-        "button:has(img) + button:has(i.google-symbols:text-is('accessibility_new'))"
+        "button:has(img) + button:has(i.google-symbols:text-is('accessibility_new')), "
+        "flow-slot-chip-button:has(mat-icon:text-is('accessibility_new')) button"
     )
+    #: The settle signal for body mode: proof the generated face actually mounted as
+    #: a reference, so the SHARED prompt box now belongs to body mode. Editing it
+    #: earlier types the body prompt into the face composer (#395).
+    #:
+    #: labs mounts a dismissable card around a ``media.getMediaUrlRedirect`` image.
+    #: The migrated host serves reference images from a different origin entirely —
+    #: ``flow-content.google/image/<id>`` — and mounts a bare ``<img>`` with no card
+    #: chrome. Measured 2026-09-06 (``spike_migrated_body_reference_chip.py``):
+    #: absent before the Create body click, present after it, so it is a genuine
+    #: transition signal and not something that is simply always on the page.
     _CHARACTER_BODY_REFERENCE_SELECTOR = (
         "button[data-card-open]:has(img[src*='media.getMediaUrlRedirect'])"
-        ":has(i.google-symbols:text-is('cancel'))"
+        ":has(i.google-symbols:text-is('cancel')), "
+        "img[src*='flow-content.google/image/']"
     )
 
     # Character-editor model picker.  The editor shows a model chip ("🍌 Nano
@@ -3407,10 +3746,66 @@ class UiAutomationTransport(VideoGenerationMixin):
     # ⚠️ NOT yet spiked from the live DOM — this is a reasonable best-effort
     # selector cascade, live-confirmed later.  A failed pick is NON-FATAL:
     # generation proceeds with Flow's default model.
+    #: The ligature carrier differs by host — labs renders `<i class="google-symbols">`,
+    #: flow.google.com renders `<mat-icon>` — so both are listed. A run that omitted the
+    #: mat-icon variants logged `model-picker trigger not found` on the migrated host and
+    #: generated on whatever tier the editor happened to open on (live 2026-09-06).
     _CHARACTER_MODEL_PICKER_TRIGGER_SELECTORS = (
         "button:has(i.google-symbols:text-is('arrow_drop_down'))",
+        "button:has(mat-icon:text-is('arrow_drop_down'))",
         "[role='button']:has(i.google-symbols:text-is('arrow_drop_down'))",
+        "[role='button']:has(mat-icon:text-is('arrow_drop_down'))",
     )
+
+    #: Every character model is a "Nano Banana …" tier, so the model chip is the one
+    #: `arrow_drop_down` control whose own text names one. The editor renders several
+    #: such controls; picking `.first` blindly is how a picker ends up driving the
+    #: wrong menu. Product names are not localized (see :data:`CHARACTER_MODELS`).
+    _CHARACTER_MODEL_CHIP_HINT = "Nano Banana"
+
+    #: How each CLI alias is recognised among the editor's menu entries. Reuses the
+    #: migrated composer's matcher so both hosts obey the same #539 rule: match in
+    #: Python, and REFUSE an ambiguous hit rather than resolving `.first`.
+    #: "Nano Banana 2" is a prefix of "Nano Banana 2 Lite", so it must exclude it;
+    #: "Nano Banana Pro" shares no prefix and needs no exclusion. Product names are
+    #: not localized, which is why matching entries by display text is permitted
+    #: here where the locale-invariance rule otherwise forbids it.
+    _CHARACTER_MODEL_MATCHERS: ClassVar[dict[str, ModelMenuMatcher]] = {
+        "nano2": ModelMenuMatcher("Nano Banana 2", excludes="Lite"),
+        "nanopro": ModelMenuMatcher("Nano Banana Pro", excludes=None),
+    }
+
+    async def _find_character_model_chip(self, page: Any) -> tuple[Any | None, str]:
+        """Return the model chip and the text it currently shows.
+
+        Prefers a candidate whose text names a model tier over a bare positional
+        `.first`, so a page carrying several `arrow_drop_down` controls cannot
+        hand the picker somebody else's menu. Falls back to the first candidate
+        when none names a tier — better to try than to skip the selection.
+        """
+        # Wait for SOMETHING to mount before enumerating. A bare count() races the
+        # editor: the readiness gate only proves the prompt box exists, and the
+        # model chip lands after it. Dropping this wait during a refactor turned a
+        # working picker back into "model-picker trigger not found" (2026-09-06).
+        for trig_sel in self._CHARACTER_MODEL_PICKER_TRIGGER_SELECTORS:
+            try:
+                await page.locator(trig_sel).first.wait_for(state="visible", timeout=4000)
+                break
+            except Exception:  # noqa: BLE001,PERF203 - try the next carrier
+                continue
+
+        fallback: Any | None = None
+        fallback_text = ""
+        for trig_sel in self._CHARACTER_MODEL_PICKER_TRIGGER_SELECTORS:
+            locator = page.locator(trig_sel)
+            for index in range(await locator.count()):
+                candidate = locator.nth(index)
+                text = (await candidate.text_content() or "").strip()
+                if self._CHARACTER_MODEL_CHIP_HINT.casefold() in text.casefold():
+                    return candidate, text
+                if fallback is None:
+                    fallback, fallback_text = candidate, text
+        return fallback, fallback_text
 
     async def _select_character_model(
         self,
@@ -3418,80 +3813,154 @@ class UiAutomationTransport(VideoGenerationMixin):
         model_alias: str,
         out_dir: Any = None,
     ) -> None:
-        """Best-effort select the character model via the editor's model picker.
+        """Apply the requested character model, or raise. Never silently proceed.
 
-        ``model_alias`` is the friendly CLI alias (``"nano2"`` / ``"nanopro"``);
-        it is mapped through :data:`CHARACTER_MODELS` to the UI display name.
+        ``model_alias`` is the friendly CLI alias (``"nano2"`` / ``"nanopro"``).
 
-        If the requested model is the DEFAULT (``nano2`` / "Nano Banana 2") the
-        picker is left untouched — it is already selected, so an extra click is
-        wasteful and risks closing nothing useful.
+        **This is a hard gate, deliberately.** It used to be best-effort: every
+        failure logged a warning and let the generation run on whatever tier the
+        editor happened to show. For a CLI that is the worst outcome — the user
+        gets a paid artifact from a model they did not ask for, and nothing in
+        the output says so. Both halves of that were seen live on 2026-09-06:
+        ``--model nano2`` generating on Pro because the picker assumed nano2 was
+        the default, and a later run whose menu-item click timed out, leaving the
+        tier unchanged while the generation proceeded.
 
-        Otherwise the dropdown is opened (the element bearing the
-        ``arrow_drop_down`` ligature near the model chip) and the option whose
-        visible text contains the display name is clicked.
+        Aborting is **free**. Everything here happens before the prompt is
+        submitted, so a raise costs no quota and no credits.
 
-        NON-FATAL: if the alias is unknown, or the dropdown / option cannot be
-        found, a warning is logged and generation proceeds with Flow's default
-        model.  The picker DOM is not yet spiked — see the selector constants.
+        The selection is verified by re-reading the chip afterwards rather than
+        trusting the click, because the click is exactly what was observed to
+        fail. One retry absorbs a menu that re-renders under us; anything else
+        raises.
+
+        Raises:
+            :class:`~gflow_cli.errors.ConfigurationError`: the alias is unknown,
+                or the menu does not offer exactly one entry matching it.
+            :class:`~gflow_cli.errors.UiSelectorDriftError`: the picker or its
+                menu could not be driven, or the tier did not apply.
         """
-        display_name = CHARACTER_MODELS.get(model_alias.lower())
-        if display_name is None:
-            log.warning(
-                "ui_automation.character_model_picker_not_found",
-                model=model_alias,
-                reason="unknown_alias",
+        matcher = self._CHARACTER_MODEL_MATCHERS.get(model_alias.lower())
+        if matcher is None:
+            raise ConfigurationError(
+                detail=(
+                    f"unknown character model {model_alias!r}; "
+                    f"known aliases: {', '.join(sorted(self._CHARACTER_MODEL_MATCHERS))}"
+                ),
+                remediation_hint="Pass --model nano2 or --model nanopro.",
             )
-            return
 
-        # nano2 / "Nano Banana 2" is the editor default — already selected.
-        default_display = CHARACTER_MODELS["nano2"]
-        if display_name == default_display:
-            log.info(
-                "ui_automation.character_model_selected",
-                model=display_name,
-                via="default_no_click",
-            )
-            return
-
-        try:
-            opened = False
-            for trig_sel in self._CHARACTER_MODEL_PICKER_TRIGGER_SELECTORS:
-                try:
-                    trigger = page.locator(trig_sel).first
-                    await trigger.wait_for(state="visible", timeout=4000)
-                    await trigger.click()
-                    await page.wait_for_timeout(400)
-                    opened = True
-                    break
-                except Exception:
-                    continue
-            if not opened:
-                raise RuntimeError("model-picker trigger not found")
-
-            option_sel = f":has-text('{display_name}')"
-            option = page.locator(option_sel).first
-            await option.wait_for(state="visible", timeout=4000)
-            await option.click()
-            await page.wait_for_timeout(400)
-            log.info(
-                "ui_automation.character_model_selected",
-                model=display_name,
-                via=option_sel,
-            )
-        except Exception as e:
-            log.warning(
-                "ui_automation.character_model_picker_not_found",
-                model=model_alias,
-                display_name=display_name,
-                error=str(e)[:120],
-                note="Flow default model applies",
-            )
+        trigger, current = await self._find_character_model_chip(page)
+        if trigger is None:
             await _capture_debug_screenshot(page, out_dir, "debug_character_model_picker.png")
+            raise UiSelectorDriftError(
+                detail=(
+                    "character editor: the model picker (an arrow_drop_down control naming a "
+                    f"model tier) was not found, so --model {model_alias} could not be applied. "
+                    f"URL: {page.url}."
+                ),
+            )
+
+        if matcher.matches(current):
+            # Logged because the path is otherwise invisible: a run that
+            # short-circuits emits no model event, and a field timeline cannot
+            # tell "already on the tier you asked for" from "never looked".
+            log.info(
+                "ui_automation.character_model_already_selected",
+                model=current,
+                requested=model_alias,
+            )
+            return
+
+        last_seen = current
+        for attempt in (1, 2):
+            await trigger.click(timeout=4000)
+            # ``:visible`` is load-bearing. The editor keeps several menus in the
+            # DOM at once (two `flow-add-menu`s plus the model `mat-menu`), so an
+            # unscoped `[role='menuitem']` list mixes the open overlay's items
+            # with hidden ones from the others. The text list and the clickable
+            # list then disagree, and `nth(i)` — an index into the text list —
+            # lands on a hidden node: `Locator.click: Timeout 4000ms exceeded`,
+            # every time, while the same selector worked whenever the other menus
+            # happened not to be mounted. Measured live 2026-09-06.
+            items = page.locator(f"{MENU_ITEM}:visible")
             try:
-                await page.keyboard.press("Escape")
-            except Exception:
-                pass
+                await items.first.wait_for(state="visible", timeout=5000)
+            except Exception as e:
+                await _capture_debug_screenshot(page, out_dir, "debug_character_model_picker.png")
+                raise UiSelectorDriftError(
+                    detail=(
+                        "character editor: the model menu ([role='menuitem']) did not open, so "
+                        f"--model {model_alias} could not be applied. URL: {page.url}."
+                    ),
+                ) from e
+
+            # Matched in Python rather than through a `has_text` filter: an
+            # *exclusion* is not expressible as has_text, the menu is read back for
+            # the refusal diagnostic anyway, and more than one hit must REFUSE
+            # instead of resolving `.first` (#539 — a `.first` on an ambiguous
+            # selector picks a tier the user never asked for, and Flow bills it).
+            offered = [t.strip() for t in await items.all_text_contents()]
+            hits = [i for i, text in enumerate(offered) if matcher.matches(text)]
+            if len(hits) != 1:
+                await self._dismiss_character_model_menu(page)
+                raise ConfigurationError(
+                    detail=(
+                        f"--model {model_alias} matched {len(hits)} entries in the character "
+                        f"model menu; offered: {', '.join(offered) or '(none)'}"
+                    ),
+                    remediation_hint=(
+                        "Pass a --model that names exactly one offered entry."
+                        if hits
+                        else "Pass --model with one of the offered names."
+                    ),
+                )
+
+            try:
+                await items.nth(hits[0]).click(timeout=4000)
+            except Exception:  # noqa: BLE001 - a flaky click is what the retry is for
+                log.warning(
+                    "ui_automation.character_model_click_failed",
+                    requested=model_alias,
+                    attempt=attempt,
+                )
+                await self._dismiss_character_model_menu(page)
+                continue
+            await page.wait_for_timeout(400)
+
+            # Verify, never assume: the click is precisely what was seen to fail.
+            _, last_seen = await self._find_character_model_chip(page)
+            if matcher.matches(last_seen):
+                log.info(
+                    "ui_automation.character_model_selected",
+                    model=last_seen,
+                    requested=model_alias,
+                    attempt=attempt,
+                )
+                return
+            log.warning(
+                "ui_automation.character_model_not_applied",
+                requested=model_alias,
+                chip=last_seen,
+                attempt=attempt,
+            )
+
+        await _capture_debug_screenshot(page, out_dir, "debug_character_model_picker.png")
+        raise UiSelectorDriftError(
+            detail=(
+                f"character editor: --model {model_alias} did not apply — the model chip still "
+                f"reads {last_seen!r} after two attempts. Refusing to generate on a tier you did "
+                f"not ask for. URL: {page.url}."
+            ),
+        )
+
+    async def _dismiss_character_model_menu(self, page: Any) -> None:
+        """Close an open model menu; never fatal."""
+        try:
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(200)
+        except Exception:  # noqa: BLE001 - dismissal is a courtesy
+            log.debug("ui_automation.character_model_menu_dismiss_failed", exc_info=True)
 
     _CHARACTER_ROUTE_ATTEMPTS = 4
     _CHARACTER_ROUTE_BACKOFF_MS = 2_500
@@ -3589,6 +4058,19 @@ class UiAutomationTransport(VideoGenerationMixin):
         await self._settle_if_redirecting(page)
         await self._dismiss_blocking_overlays(page, self._out_dir)
         await self._settle_on_character_route(page, entity_id=entity_id, url=url)
+
+        # NO migrated-host guard here, deliberately. One stood here and was
+        # wrong: flow.google.com renders the character editor in full — name,
+        # voice, personality, Upload / Add from project, Create portrait /
+        # Create body — against the SAME labs tRPC and aisandbox backend
+        # (recon 2026-09-06, scripts/dev/spike_migrated_vs_labs_provenance.py:
+        # the migrated page itself calls flow.projectInitialData and
+        # v1:checkAppAvailability). What differed was the view layer, React +
+        # Slate vs Angular + ProseMirror, so the readiness selector missed and
+        # a present feature was read as an absent one. The guard then turned
+        # that misreading into a confident, non-retryable "this host will never
+        # do it". Do not reinstate it without live evidence that the editor is
+        # actually gone.
 
         # Wait for the Slate editor to mount — the prompt textbox is the
         # reliable "editor ready" anchor for the character editor surface.

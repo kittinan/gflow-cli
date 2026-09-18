@@ -46,18 +46,16 @@ from gflow_cli.api.transports.migrated_composer import (  # noqa: E402
     _ligature,
 )
 
-from _spike_common import build_client, resolve_profile_dir  # noqa: E402, isort: skip
+from _spike_common import build_client, default_out_path, resolve_profile_dir  # noqa: E402, isort: skip
 
 PROMPT = "a man crying"
-#: Filters the mention picker. "Me" resolved to a real entity on the probe account.
-QUERY = "Me"
 
 
 def _stage(msg: str) -> None:
     print(f"[stage] {msg}", file=sys.stderr, flush=True)
 
 
-async def _pick_first_reference(page: Any) -> dict[str, Any]:
+async def _pick_first_reference(page: Any, query: str | None = None) -> dict[str, Any]:
     """Insert a mention chip, using the gesture that actually works.
 
     Two things had to be right, both learned the hard way:
@@ -74,9 +72,20 @@ async def _pick_first_reference(page: Any) -> dict[str, Any]:
     # open and inserts nothing, which is why earlier runs saw chips: 0.
     await page.keyboard.type("@", delay=120)
     await page.wait_for_timeout(2200)
-    await page.keyboard.press("ArrowDown")
-    await page.wait_for_timeout(1500)
-    await page.keyboard.press("Enter")
+    if query:
+        # Typing the name and pressing Enter WITHOUT ArrowDown is what commits the
+        # CHARACTER ENTITY. Measured 2026-09-07 (capture_migrated_mention_gestures.py):
+        # the picker lists entities and media together, `query`+Enter returns
+        # data-reference-type="entity" with the real entity_id, while the same query
+        # with ArrowDown first returns reference_type="media" - a file that merely
+        # shares the name. Flow does not rank them; the caller must.
+        await page.keyboard.type(query, delay=90)
+        await page.wait_for_timeout(2500)
+        await page.keyboard.press("Enter")
+    else:
+        await page.keyboard.press("ArrowDown")
+        await page.wait_for_timeout(1500)
+        await page.keyboard.press("Enter")
     await page.wait_for_timeout(3000)
 
     out["chips"] = await page.evaluate(
@@ -112,7 +121,7 @@ def _decode(post_data: str | None) -> Any:
         return {"decode_error": f"{type(exc).__name__}: {exc}", "raw": post_data[:2000]}
 
 
-async def _probe(page: Any, project_id: str) -> dict[str, Any]:
+async def _probe(page: Any, project_id: str, query: str | None = None) -> dict[str, Any]:
     composer = MigratedComposer()
     await composer.ensure_editor(page, project_id)
 
@@ -170,7 +179,7 @@ async def _probe(page: Any, project_id: str) -> dict[str, Any]:
     _stage("settled; composer should be clear to type into")
 
     _stage("submode set; picking reference")
-    report: dict[str, Any] = {"reference": await _pick_first_reference(page)}
+    report: dict[str, Any] = {"reference": await _pick_first_reference(page, query)}
 
     await page.locator(COMPOSER).first.click(timeout=5000)
     await page.keyboard.insert_text(f" {PROMPT}")
@@ -260,11 +269,11 @@ async def _probe(page: Any, project_id: str) -> dict[str, Any]:
     return report
 
 
-async def _main(profile: str, project_id: str, out_path: str) -> int:
+async def _main(profile: str, project_id: str, out_path: str, query: str | None = None) -> int:
     async with build_client(resolve_profile_dir(profile)) as client:
         page = client._page  # noqa: SLF001 — dev instrument
         assert page is not None
-        report = await _probe(page, project_id)
+        report = await _probe(page, project_id, query)
         # Written INSIDE the context: the previous run reached the capture and then hung
         # in teardown, losing it. The file is the deliverable; stdout is a convenience.
         out = Path(out_path)
@@ -278,9 +287,24 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("profile")
     parser.add_argument("project_id")
-    parser.add_argument("--out", default="r2v_payload.json")
+    parser.add_argument(
+        "--out",
+        default=None,
+        help="where to write the report (default: a timestamped file in the "
+        "gitignored scripts/dev/_spike_out/). These reports carry decoded "
+        "batchexecute payloads — prompt text, project and media ids — so the "
+        "default deliberately never lands in the tracked tree.",
+    )
+    parser.add_argument(
+        "--query",
+        default=None,
+        help="Type this after `@` and commit with Enter, which selects the CHARACTER "
+        "ENTITY of that name. Omit to keep the original ArrowDown+Enter gesture, which "
+        "takes whatever the picker lists first (in practice a media asset).",
+    )
     args = parser.parse_args()
-    return asyncio.run(_main(args.profile, args.project_id, args.out))
+    args.out = args.out or str(default_out_path("migrated_r2v_submit_payload"))
+    return asyncio.run(_main(args.profile, args.project_id, args.out, args.query))
 
 
 if __name__ == "__main__":

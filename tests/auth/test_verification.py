@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -17,18 +18,38 @@ from gflow_cli.auth.verification import (
 )
 from gflow_cli.errors import SecurityError
 
+
 # Representative authenticated /api/auth/session body. Sanitised — no real
 # PII. Pins the endpoint contract: if Google changes the response shape, the
 # AUTHENTICATED assertions below fail loudly instead of the change going silent.
-AUTHENTICATED_BODY = json.dumps(
-    {
+def _session_body(*, expires: datetime, error: str | None = None) -> str:
+    """A captured session body with a caller-chosen expiry.
+
+    `expires` used to be the literal string from the original capture. That made the
+    fixture rot: once real time passed it, the body described an EXPIRED session and the
+    "authenticated" tests failed for a reason that had nothing to do with the code under
+    test. Expiry is now stated relative to now, so the fixture keeps meaning what its name
+    says.
+    """
+    body: dict[str, object] = {
         "user": {
             "name": "Test User",
             "email": "test.user@example.com",
             "image": "https://lh3.googleusercontent.com/a/fake",
         },
-        "expires": "2026-06-16T08:39:21.000Z",
+        "expires": expires.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
     }
+    if error is not None:
+        body["error"] = error
+    return json.dumps(body)
+
+
+AUTHENTICATED_BODY = _session_body(expires=datetime.now(UTC) + timedelta(days=1))
+#: The shape a real profile answered with on 2026-09-13: a full `user`, an `expires`
+#: already in the past, and Flow's own refresh marker. Every tRPC call made with those
+#: cookies answered 401.
+EXPIRED_BODY = _session_body(
+    expires=datetime.now(UTC) - timedelta(hours=2), error="ACCESS_TOKEN_REFRESH_NEEDED"
 )
 
 
@@ -140,6 +161,127 @@ def _build_verify_mock(
 
     mock_ap = MagicMock(name="async_playwright", return_value=mock_cm)
     return mock_ap, mock_ctx
+
+
+class TestExpiredSessionIsNotAuthenticated:
+    """A `user` block is not proof the session works.
+
+    Measured on two live profiles (2026-09-12 and 2026-09-13): the endpoint answered 200
+    with a complete `user`, an `expires` in the past and `error:
+    ACCESS_TOKEN_REFRESH_NEEDED`, while every tRPC call made with those same cookies
+    answered 401 Unauthorized. Reading only `user.email` reported that as AUTHENTICATED, so
+    `gflow auth login` printed success over a dead session and the user found out from a
+    401 hours later.
+    """
+
+    def test_an_expired_session_is_reported_as_expired(self) -> None:
+        status = evaluate_session_response(200, EXPIRED_BODY, google_session=True, source="chrome")
+        assert status.outcome is FlowSessionOutcome.EXPIRED
+        assert status.authenticated is False
+        # The email survives: naming the account is what makes the message actionable.
+        assert status.user_email == "test.user@example.com"
+
+    def test_a_past_expiry_alone_is_enough(self) -> None:
+        body = _session_body(expires=datetime.now(UTC) - timedelta(seconds=30))
+        status = evaluate_session_response(200, body, google_session=True, source="chrome")
+        assert status.outcome is FlowSessionOutcome.EXPIRED
+
+    def test_a_refresh_error_alone_is_enough(self) -> None:
+        body = _session_body(
+            expires=datetime.now(UTC) + timedelta(days=1), error="ACCESS_TOKEN_REFRESH_NEEDED"
+        )
+        status = evaluate_session_response(200, body, google_session=True, source="chrome")
+        assert status.outcome is FlowSessionOutcome.EXPIRED
+
+    def test_an_unreadable_expiry_never_downgrades_a_working_session(self) -> None:
+        """Fail OPEN on a shape change: this predicate may only demote on positive
+        evidence, or a Flow-side format tweak locks every user out of their own login."""
+        body = json.dumps({"user": {"email": "a@b.c"}, "expires": "whenever"})
+        status = evaluate_session_response(200, body, google_session=True, source="chrome")
+        assert status.outcome is FlowSessionOutcome.AUTHENTICATED
+
+    def test_a_missing_expiry_never_downgrades_a_working_session(self) -> None:
+        body = json.dumps({"user": {"email": "a@b.c"}})
+        status = evaluate_session_response(200, body, google_session=True, source="chrome")
+        assert status.outcome is FlowSessionOutcome.AUTHENTICATED
+
+
+class TestExpiryIsReportedBackToTheUser:
+    """Flow's sessions last about a day, and nothing told the user when the next 401 was
+    due. The body already carries `expires`; the verdict now carries it too, so
+    `gflow auth status` can print a deadline instead of a bare "verified"."""
+
+    def test_a_live_session_reports_when_it_ends(self) -> None:
+        deadline = datetime.now(UTC) + timedelta(hours=16)
+        status = evaluate_session_response(
+            200, _session_body(expires=deadline), google_session=True, source="chrome"
+        )
+        assert status.outcome is FlowSessionOutcome.AUTHENTICATED
+        assert status.expires_at is not None
+        # Serialised to whole seconds, so compare at that resolution.
+        assert abs((status.expires_at - deadline).total_seconds()) < 1
+
+    def test_an_expired_session_still_reports_its_deadline(self) -> None:
+        """The timestamp is most useful precisely when it has passed — it answers "since
+        when?", which is the difference between "log in again" and "something else broke"."""
+        status = evaluate_session_response(200, EXPIRED_BODY, google_session=True, source="chrome")
+        assert status.outcome is FlowSessionOutcome.EXPIRED
+        assert status.expires_at is not None
+        assert status.expires_at < datetime.now(UTC)
+
+    def test_an_unreadable_expiry_is_reported_as_unknown_not_guessed(self) -> None:
+        body = json.dumps({"user": {"email": "a@b.c"}, "expires": "whenever"})
+        status = evaluate_session_response(200, body, google_session=True, source="chrome")
+        assert status.outcome is FlowSessionOutcome.AUTHENTICATED
+        assert status.expires_at is None
+
+
+class TestSessionExpiryCache:
+    """The deadline lives only in Flow's session body — it sits inside an encrypted JWE
+    cookie, so nothing local can read it, and probing the endpoint at the start of every
+    generation would add a round trip to every run. It is cached whenever a probe learns
+    it, and read by a pre-flight that only ever WARNS."""
+
+    def test_a_recorded_deadline_reads_back(self, tmp_path: Path) -> None:
+        from gflow_cli.auth.verification import read_session_expiry, record_session_expiry
+
+        when = datetime.now(UTC) + timedelta(hours=5)
+        record_session_expiry(tmp_path, when)
+        assert read_session_expiry(tmp_path) == when
+
+    def test_recording_none_clears_a_stale_deadline(self, tmp_path: Path) -> None:
+        """A probe that cannot read the expiry must not leave the previous answer standing
+        — a stale deadline that has 'passed' would warn on every run forever."""
+        from gflow_cli.auth.verification import read_session_expiry, record_session_expiry
+
+        record_session_expiry(tmp_path, datetime.now(UTC) + timedelta(hours=5))
+        record_session_expiry(tmp_path, None)
+        assert read_session_expiry(tmp_path) is None
+
+    def test_no_cache_reads_as_none(self, tmp_path: Path) -> None:
+        from gflow_cli.auth.verification import read_session_expiry
+
+        assert read_session_expiry(tmp_path) is None
+
+    def test_a_corrupt_cache_is_ignored_not_raised(self, tmp_path: Path) -> None:
+        """This feeds a diagnostic. A profile with a garbled cache must still RUN."""
+        from gflow_cli.auth.verification import SESSION_EXPIRY_FILE, read_session_expiry
+
+        (tmp_path / SESSION_EXPIRY_FILE).write_text("not a timestamp", encoding="utf-8")
+        assert read_session_expiry(tmp_path) is None
+
+    def test_a_naive_timestamp_is_read_as_utc(self, tmp_path: Path) -> None:
+        from gflow_cli.auth.verification import SESSION_EXPIRY_FILE, read_session_expiry
+
+        (tmp_path / SESSION_EXPIRY_FILE).write_text("2026-09-13T19:42:21", encoding="utf-8")
+        got = read_session_expiry(tmp_path)
+        assert got is not None and got.tzinfo is not None
+
+    def test_an_unwritable_profile_never_raises(self, tmp_path: Path) -> None:
+        """Losing a warning is acceptable; failing a login over a cache write is not."""
+        from gflow_cli.auth.verification import record_session_expiry
+
+        record_session_expiry(tmp_path / "does" / "not" / "exist", datetime.now(UTC))
 
 
 class TestVerifyFlowSession:

@@ -891,7 +891,7 @@ _ui_mode_option = click.option(
     "-o",
     "--output",
     "output_file",
-    type=click.Path(path_type=Path),
+    type=click.Path(dir_okay=False, path_type=Path),
     default=None,
     help="Explicit output file path for the generated asset.",
 )
@@ -1701,7 +1701,7 @@ class _I2IParams:
     "-o",
     "--output",
     "output_file",
-    type=click.Path(path_type=Path),
+    type=click.Path(dir_okay=False, path_type=Path),
     default=None,
     help="Explicit output file path for the generated asset.",
 )
@@ -1966,7 +1966,7 @@ def _print_i2i_summary(images: list[GeneratedImage], saved_paths: list[Path]) ->
         "through Flow's own Add Media dialog, which is what makes Flow attach "
         "`referenceLikenesses` to the request.\n\n"
         "AVAILABILITY: Flow gates Avatar on identity verification AND region. "
-        "gflow checks eligibility before generating and aborts with exit 37 "
+        "gflow checks eligibility before generating and aborts with exit 39 "
         "(no credits spent) when the account cannot use it. Confirm the Avatar "
         "tab works in Flow's web UI first if you are unsure.\n\n"
         "\b\n"

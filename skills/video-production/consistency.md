@@ -45,6 +45,19 @@ gflow character create --project <id> --name <Name> \
 
 The face prompt generates the first reference image. The body prompt is wrapped into a front/side/back triptych seeded by that face, so one generation yields all three angles on-model.
 
+**It is two generations but one unit of work.** `services/character_create.py` runs a
+persist-before-spend saga: create entity, persist STARTED, then face (slot 0) and body
+(slot 1) **sequentially, never gathered**. A crashed run resumes and skips the slots it
+already recorded, so re-running does not re-spend on a completed slot. You do not need to
+sequence or recover this yourself.
+
+**`--body-prompt` is optional, and omitting it is the quiet mistake.** A face-only entity
+still creates and still locks the face, so nothing fails — the cost only shows up later, as
+a cast with no on-model turnaround to reference. Pass it unless you have a reason not to.
+Note the ceiling this does *not* lift: per the wardrobe rule below, the triptych does **not**
+make the entity carry clothing, so the wardrobe token still has to be repeated verbatim in
+every prompt.
+
 ### The rules that make it hold
 
 - **Face prompt carries unchangeable features only** — build, hair, facial structure, eye colour, defining marks — on a plain or segmented background, which is also Flow's own documented guidance for references. No hats, glasses or props unless permanent.
@@ -146,6 +159,8 @@ When a shot carries several references, order and budget matter.
 4. **Preserve the order you wrote.** Do not sort the reference list.
 
 Caps are per model, and the entity counts against the same pool as the images: omni-flash 7, veo-lite / veo-fast / veo-lite-lp 3, **veo-quality 0 — it accepts no references at all [CONSTRAINT]**. On the image side nano2 and nano-pro take 10, imagen4 3.
+
+So a referenced shot cannot be `veo-quality`, whatever the quality target: take **omni-flash** for a single generation needing more than 3 references or the best quality with any reference at all, and a veo-lite variant when 3 is enough. **`video chain` refuses omni-flash [CONSTRAINT]** — its i2v is verified for single generations only — so chained links take a Veo 3.1 model and its cap of 3.
 
 **Select the model before attaching references [CONSTRAINT].** Switching model afterwards invalidates what was attached.
 

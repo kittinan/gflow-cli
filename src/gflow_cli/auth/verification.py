@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, cast
 
@@ -59,6 +60,12 @@ class FlowSessionOutcome(StrEnum):
 
     AUTHENTICATED = "authenticated"
     GOOGLE_SESSION_ONLY = "google_session_only"
+    #: A Flow session exists and names the user, but is no longer usable: its `expires`
+    #: has passed, or the body carries an `error` (`ACCESS_TOKEN_REFRESH_NEEDED`) saying
+    #: the access token needs re-minting. Distinct from GOOGLE_SESSION_ONLY because the
+    #: user DID complete a Flow sign-in — it simply aged out — and distinct from
+    #: AUTHENTICATED because every tRPC call with it answers 401.
+    EXPIRED = "expired"
     NO_SESSION = "no_session"
     VERIFICATION_ERROR = "verification_error"
 
@@ -66,6 +73,7 @@ class FlowSessionOutcome(StrEnum):
 _DETAIL_BY_OUTCOME: dict[FlowSessionOutcome, str] = {
     FlowSessionOutcome.AUTHENTICATED: "Flow app session verified.",
     FlowSessionOutcome.GOOGLE_SESSION_ONLY: "Signed in to Google, but not to the Flow app.",
+    FlowSessionOutcome.EXPIRED: "The Flow app session has expired.",
     FlowSessionOutcome.NO_SESSION: "No sign-in detected.",
     FlowSessionOutcome.VERIFICATION_ERROR: "Could not verify the Flow session.",
 }
@@ -84,6 +92,10 @@ class FlowSessionStatus:
     outcome: FlowSessionOutcome
     user_email: str | None
     source: str  # caller-supplied log label ("chrome"/"internal"); never from response/cookie data
+    #: When Flow says this session stops working, or None when the body did not say.
+    #: A timestamp, never a secret — safe to print, and the only way a user can find out
+    #: how long they have before the next 401 without re-running a login.
+    expires_at: datetime | None = None
 
     @property
     def detail(self) -> str:
@@ -106,6 +118,49 @@ def _validate_profile_in_home(profile_dir: Path) -> None:
         ) from None
 
 
+#: Values Flow puts in the session body's `error` slot that mean the access token can no
+#: longer be used as-is. Anything unrecognised is treated as stale too: an error slot that
+#: is populated at all has never been observed on a working session.
+_REFRESH_NEEDED = "ACCESS_TOKEN_REFRESH_NEEDED"
+
+
+def session_expires_at(parsed: dict[str, Any]) -> datetime | None:
+    """The body's ``expires`` as an aware datetime, or None when it cannot be read.
+
+    Never raises: a shape this cannot parse must leave every verdict unchanged.
+    """
+    expires = parsed.get("expires")
+    if not isinstance(expires, str) or not expires:
+        return None
+    try:
+        # NextAuth emits RFC 3339 with a trailing `Z`, which `fromisoformat` only learned
+        # to parse in 3.11 — the project floor — but normalise anyway rather than depend
+        # on it.
+        deadline = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return deadline if deadline.tzinfo else deadline.replace(tzinfo=UTC)
+
+
+def is_session_stale(parsed: dict[str, Any]) -> bool:
+    """Is this 200 session body one that will answer 401 on the next real call?
+
+    Two independent signals, either of which is enough:
+
+    * a non-empty ``error`` slot (``ACCESS_TOKEN_REFRESH_NEEDED`` is the observed value);
+    * an ``expires`` timestamp that is already in the past.
+
+    Unparseable or absent fields are NOT treated as stale — this predicate only ever
+    downgrades a session on positive evidence, so a shape change cannot lock a working
+    profile out of its own login.
+    """
+    error = parsed.get("error")
+    if isinstance(error, str) and error:
+        return True
+    deadline = session_expires_at(parsed)
+    return deadline is not None and deadline <= datetime.now(UTC)
+
+
 def evaluate_session_response(
     status_code: int,
     body: str,
@@ -122,8 +177,12 @@ def evaluate_session_response(
     never retained beyond this function.
     """
 
+    expires_at: datetime | None = None
+
     def _result(outcome: FlowSessionOutcome, email: str | None = None) -> FlowSessionStatus:
-        return FlowSessionStatus(outcome=outcome, user_email=email, source=source)
+        return FlowSessionStatus(
+            outcome=outcome, user_email=email, source=source, expires_at=expires_at
+        )
 
     if status_code != 200:
         return _result(FlowSessionOutcome.VERIFICATION_ERROR)
@@ -138,6 +197,7 @@ def evaluate_session_response(
         return _result(FlowSessionOutcome.VERIFICATION_ERROR)
 
     parsed_dict = cast("dict[str, Any]", parsed)
+    expires_at = session_expires_at(parsed_dict)
     user = parsed_dict.get("user")
     if user is None or user == {}:
         # Authenticated-shaped endpoint reachable, but no Flow session.
@@ -151,6 +211,14 @@ def evaluate_session_response(
     user_dict = cast("dict[str, Any]", user)
     email = user_dict.get("email")
     if isinstance(email, str) and email:
+        # A `user` block is NOT proof the session works. Measured 2026-09-12/13 on two
+        # profiles: the endpoint answered 200 with a full `user`, `expires` already in the
+        # past and `error: "ACCESS_TOKEN_REFRESH_NEEDED"`, while every tRPC call made with
+        # those same cookies answered 401 Unauthorized. Reading only `user.email` reported
+        # such a profile as AUTHENTICATED, so `gflow auth login` printed success over a
+        # dead session and the user learned the truth from a 401 hours later.
+        if is_session_stale(parsed_dict):
+            return _result(FlowSessionOutcome.EXPIRED, email)
         return _result(FlowSessionOutcome.AUTHENTICATED, email)
 
     # `user` present but no usable email — unexpected shape (see spec §10).
@@ -363,3 +431,52 @@ async def verify_flow_profile(
             status_code=status_code,
         )
     return result
+
+
+#: Filename inside a profile holding the last known session deadline, ISO-8601 UTC.
+#: Cached because the deadline lives only in Flow's session body: the expiry is inside an
+#: encrypted JWE cookie, so nothing local can read it, and probing the endpoint at the
+#: start of every generation would add a network round trip to every run. Written whenever
+#: a probe learns the answer (login, `auth status`), read by the cheap pre-flight.
+SESSION_EXPIRY_FILE = ".gflow_session_expires"
+#: How close to the deadline a run starts warning. Flow sessions last about a day, so an
+#: hour or two of notice is enough to re-login before a long batch rather than during one.
+EXPIRY_WARN_WINDOW = timedelta(hours=2)
+
+
+def record_session_expiry(profile_dir: Path, expires_at: datetime | None) -> None:
+    """Cache *expires_at* beside the profile. Best-effort: never raises.
+
+    A missing or unwritable file simply means the pre-flight stays quiet, which is the
+    behaviour that existed before this cache. Losing a warning is acceptable; failing a
+    login because a cache write failed is not.
+    """
+    path = profile_dir / SESSION_EXPIRY_FILE
+    try:
+        if expires_at is None:
+            path.unlink(missing_ok=True)
+            return
+        path.write_text(expires_at.isoformat(), encoding="utf-8")
+    except OSError:
+        logger.debug("session_expiry_cache_write_failed", exc_info=True)
+
+
+def read_session_expiry(profile_dir: Path) -> datetime | None:
+    """The cached deadline, or None when absent/unreadable. Never raises.
+
+    The cache can be STALE — a login performed by another process, or on another machine
+    with a transplanted profile, moves the real deadline without touching this file. It is
+    therefore only ever used to raise a warning, never to refuse a run: a wrong warning
+    costs a glance, a wrong refusal costs the whole command.
+    """
+    try:
+        raw = (profile_dir / SESSION_EXPIRY_FILE).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)

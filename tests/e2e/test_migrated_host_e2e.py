@@ -9,7 +9,7 @@ hold for any logged-in profile. They need a project id on that host::
         uv run pytest -m e2e tests/e2e/test_migrated_host_e2e.py -v
 
 Cost: the ``e2e_video`` test bills ONE 8 s clip (12 credits at the measured cohort
-rate). The ``e2e_auth`` tests spend nothing — they stop before any submit.
+rate). The ``e2e_image`` tests use Flow's separate daily image quota.
 Live evidence for the shipped build: ``docs/LIVE_VERIFICATION_v0.67.0.md``.
 """
 
@@ -24,12 +24,14 @@ import structlog
 from gflow_cli.api.client import FlowApiClient
 from gflow_cli.api.image import Aspect as ImageAspect
 from gflow_cli.api.image import GenerateImageRequest
+from gflow_cli.api.transports import migrated_composer
 from gflow_cli.api.transports._common import flow_host_kind
 from gflow_cli.api.transports.migrated_composer import MigratedComposer
 from gflow_cli.api.transports.ui_automation import UiAutomationTransport
 from gflow_cli.api.video import Aspect, GenerateVideoRequest, Mode, VideoResult
 from gflow_cli.config import reset_settings
-from gflow_cli.errors import FlowHostMigratedError
+from gflow_cli.errors import FlowHostMigratedError, UiSelectorDriftError
+from gflow_cli.mcp import tools as mcp_tools
 
 pytestmark = pytest.mark.e2e
 
@@ -109,6 +111,75 @@ async def test_e2e_migrated_host_serves_this_account(
         await MigratedComposer().ensure_editor(page, project, timeout_s=45.0)
         assert flow_host_kind(page.url) == "migrated", page.url
         assert await page.locator(".settings-trigger-button").first.count() == 1
+    finally:
+        await transport.teardown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.e2e_auth
+async def test_e2e_agent_mode_is_left_before_the_readiness_gate(
+    e2e_profile_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """$0 (#749): Flow's agent-mode chip `hidden`s the settings trigger. Drive the
+    account INTO agent mode, then prove `ensure_editor` gets it back out.
+
+    Carries its own A/B control. Passing only the with-fix arm would not show the
+    recovery works — the account might simply never have been in agent mode. So the
+    control arm neuters `AGENT_MODE_CHIP` to a selector that cannot match and asserts
+    the run fails; the fix arm restores it and asserts the run succeeds. Both arms
+    stop before any submit, so this bills nothing.
+    """
+    project = _project_id()
+    _set_flow_host(monkeypatch, None)
+    transport = UiAutomationTransport()
+    try:
+        await transport.setup(e2e_profile_dir)
+        page = transport._page  # noqa: SLF001 - the e2e reads the live page
+        assert page is not None
+        composer = MigratedComposer()
+        await composer.ensure_editor(page, project, timeout_s=45.0)
+
+        # Into agent mode, through the chip a user would click. `aria-pressed='false'`
+        # is the same control before it is pressed.
+        chip = page.locator("button.agent-mode-chip[aria-pressed='false']").first
+        if not await chip.count():
+            pytest.skip("this account's composer renders no agent-mode chip")
+        await chip.click(timeout=10_000)
+        await page.locator(migrated_composer.READY_ANCHOR).first.wait_for(
+            state="hidden", timeout=15_000
+        )
+        try:
+            # --- control: the recovery cannot fire -> the gate must still fail -----
+            # `monkeypatch.context()`, never `undo()`: this is the function-scoped
+            # instance the autouse `_isolate_settings` and the e2e `GFLOW_CLI_HOME`
+            # were set through, and `undo()` pops the WHOLE stack — every line after it
+            # would resolve against the developer's own catalog and profile store
+            # (#86's pollution mode, reintroduced mid-test).
+            with monkeypatch.context() as m:
+                m.setattr(migrated_composer, "AGENT_MODE_CHIP", "button.gflow-no-such-chip")
+                # Pinned to the message, not just the class: without this the control
+                # passes on ANY drift, including one raised by the recovery firing
+                # wrongly, and stops discriminating the moment it matters.
+                with pytest.raises(UiSelectorDriftError, match="did not become visible"):
+                    await composer.ensure_editor(page, project, timeout_s=10.0)
+
+            # --- fix: the recovery fires -> the classic composer comes back --------
+            await composer.ensure_editor(page, project, timeout_s=45.0)
+            assert await page.locator(migrated_composer.READY_ANCHOR).first.is_visible()
+        finally:
+            # Agent mode is remembered per ACCOUNT, server-side, so a test that turns it
+            # on restores it — including when it failed. gflow 0.71.0 and earlier have no
+            # recovery at all, so a chip left pressed here breaks every run a user makes
+            # on that build until someone clicks it back in a browser.
+            # Best-effort by construction: if the body failed BECAUSE something is
+            # covering the chip, this click times out too, and an exception here would
+            # replace the real assertion failure with a cleanup one.
+            try:
+                pressed = page.locator("button.agent-mode-chip[aria-pressed='true']").first
+                if await pressed.count():
+                    await pressed.click(timeout=10_000)
+            except Exception as cleanup_error:  # noqa: BLE001 - never mask the verdict
+                print(f"agent-mode restore failed, chip may still be pressed: {cleanup_error}")
     finally:
         await transport.teardown()
 
@@ -198,9 +269,13 @@ async def test_e2e_r2v_binds_local_references_on_the_migrated_host(
     The layer that matters is the last one. Chips in the DOM and ids in the log only
     prove Flow ACCEPTED the references; ``_r2v_body_problem`` asserting the submit body
     carries every uploaded id is what proves the run is the one the caller asked for —
-    the failure mode being a full-price clip with none of them on it. That assertion is
-    armed inside ``submit_and_observe``, so a run that reached ``migrated.result``
-    without it firing is the evidence.
+    the failure mode being a full-price clip with none of them on it.
+
+    Reaching ``migrated.result`` is NOT evidence that assertion fired. The run this test
+    recorded predates the fix that armed the listener on the r2v path, and passed with the
+    check unreachable; what it proves is the references bound, not that a lost one would
+    have been caught. The assertion's own round trip is covered offline, at zero credits,
+    by ``test_submit_arms_the_body_assertion_on_the_r2v_path``.
     """
     refs = tuple(_write_reference(tmp_path / name) for name in ("ref_one.png", "ref_two.png"))
     project = _project_id()
@@ -246,19 +321,14 @@ async def test_e2e_r2v_binds_local_references_on_the_migrated_host(
 
 
 @pytest.mark.asyncio
-@pytest.mark.e2e_auth
-async def test_e2e_image_on_a_moved_account_exits_36_not_recaptcha(
+@pytest.mark.e2e_image
+async def test_e2e_t2i_runs_on_a_moved_account(
     e2e_profile_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     install_log_capture: structlog.testing.LogCapture,
 ) -> None:
-    """$0 (#673): ``image t2i --project`` on a MOVED account must fail with the
-    distinct exit-36 error, not a bare RecaptchaError. The labs client mints the
-    reCAPTCHA token on the pool's bootstrap page before the transport runs; on a
-    moved account that page is the flow.google.com grid, which has no
-    recaptcha/enterprise.js. Measured 2026-09-05: exit 1 in 13 s before the fix.
-    Skips on an unmoved account — the labs page carries the script there."""
+    """A moved profile uses the page-owned ``ogiZ0b`` submit and returns an image."""
     project = _project_id()
     _set_flow_host(monkeypatch, None)
     req = GenerateImageRequest(
@@ -269,13 +339,41 @@ async def test_e2e_image_on_a_moved_account_exits_36_not_recaptcha(
         assert page is not None
         if flow_host_kind(page.url) != "migrated":
             pytest.skip("profile is not on the migrated host; the labs page mints fine")
-        with pytest.raises(FlowHostMigratedError):
-            await client.generate_image(project_id=project, req=req)
+        image = await client.generate_image(project_id=project, req=req)
 
-    bails = [
-        e for e in install_log_capture.entries if e.get("event") == "ui_driver.migrated_host_bail"
-    ]
-    assert bails and bails[0].get("at") == "mint_recaptcha_token", bails
-    # The page the mint saw is the migrated origin (the grid, route "/", in the
-    # reporter's bundle) — not a labs page that merely lost its script.
-    assert flow_host_kind(str(bails[0].get("url"))) == "migrated", bails[0]
+    assert image.media_name and image.workflow_id
+    assert image.fife_url.startswith("https://flow-content.google/image/")
+    assert image.dimensions[0] > 0 and image.dimensions[1] > 0
+    events = [str(e.get("event")) for e in install_log_capture.entries]
+    assert "migrated.image_settings_applied" in events
+    assert "ui_driver.migrated_host_bail" not in events
+
+
+@pytest.mark.asyncio
+@pytest.mark.e2e_image
+async def test_e2e_mcp_i2i_runs_on_the_migrated_host(
+    e2e_profile_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The MCP twin carries a local reference through queue decode and ``ogiZ0b``."""
+    del e2e_profile_dir  # fixture selects the real authenticated gflow home
+    project = _project_id()
+    _set_flow_host(monkeypatch, None)
+    profile = os.environ["GFLOW_CLI_E2E_PROFILE"].strip()
+    reference = _write_reference(tmp_path / "migrated-mcp-i2i.png")
+
+    result = await mcp_tools.gflow_generate_image(
+        prompt="turn the gradient reference into a folded-paper landscape",
+        model="nano-pro",
+        aspect="16:9",
+        reference_images=[str(reference)],
+        profile=profile,
+        project=project,
+        wait=True,
+    )
+
+    assert result["status"] == "completed", result
+    assert result["params"]["reference_images"] == [str(reference)]
+    files = [Path(path) for path in result["files"]]
+    assert files and all(path.exists() and path.stat().st_size > 10_000 for path in files)

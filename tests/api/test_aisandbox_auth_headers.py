@@ -144,9 +144,10 @@ _TOKEN = '{"access_token":"ya29.FRESH","expires":"2999-01-01T00:00:00Z"}'
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_missing_token_triggers_one_silent_relogin(monkeypatch):
+async def test_missing_token_triggers_one_silent_relogin(monkeypatch, tmp_path):
     """Expired NextAuth session + live Google SSO → re-mint, then return the token."""
     c = _make_client()
+    c.profile_dir = tmp_path
     c._context = _SeqContext(["{}", _TOKEN])
     calls: list[object] = []
 
@@ -197,11 +198,12 @@ async def test_relogin_is_attempted_once_per_client(monkeypatch):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_concurrent_misses_share_one_relogin(monkeypatch):
+async def test_concurrent_misses_share_one_relogin(monkeypatch, tmp_path):
     """Pooled pages missing the token together must not each start a sign-in."""
     import asyncio
 
     c = _make_client()
+    c.profile_dir = tmp_path
     c._context = _SeqContext(["{}", "{}", _TOKEN])
     calls: list[object] = []
 
@@ -218,9 +220,10 @@ async def test_concurrent_misses_share_one_relogin(monkeypatch):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_non_json_expired_session_still_gets_the_relogin(monkeypatch):
+async def test_non_json_expired_session_still_gets_the_relogin(monkeypatch, tmp_path):
     """An expired session answered with an HTML page must not skip the refresh."""
     c = _make_client()
+    c.profile_dir = tmp_path
     c._context = _SeqContext(["<html>sign in</html>", _TOKEN])
     calls: list[object] = []
 
@@ -246,3 +249,91 @@ async def test_non_json_session_with_failed_relogin_raises(monkeypatch):
     monkeypatch.setattr("gflow_cli.api.client.refresh_flow_session", fake_refresh)
     with pytest.raises(AisandboxAuthError, match="non-JSON"):
         await c._fetch_access_token()
+
+
+_LAPSED = (
+    '{"user":{"email":"x@y.z"},"access_token":"ya29.STALE",'
+    '"expires":"2000-01-01T00:00:00Z","error":"ACCESS_TOKEN_REFRESH_NEEDED"}'
+)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_lapsed_session_with_stale_token_is_refreshed(monkeypatch, tmp_path):
+    """Measured 2026-09-18: a lapsed session still carries its old token — refresh anyway."""
+    from gflow_cli.auth.verification import read_session_expiry
+
+    c = _make_client()
+    c.profile_dir = tmp_path
+    c._context = _SeqContext([_LAPSED, _TOKEN])
+    calls: list[object] = []
+
+    async def fake_refresh(ctx):
+        calls.append(ctx)
+        return True
+
+    monkeypatch.setattr("gflow_cli.api.client.refresh_flow_session", fake_refresh)
+    token, _exp = await c._fetch_access_token()
+    assert token == "ya29.FRESH"
+    assert len(calls) == 1
+    # The fresh deadline replaces the cached one, so the pre-flight stops warning.
+    cached = read_session_expiry(tmp_path)
+    assert cached is not None
+    assert cached.year == 2999
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_lapsed_session_with_failed_refresh_raises(monkeypatch, tmp_path):
+    c = _make_client()
+    c.profile_dir = tmp_path
+    c._context = _SeqContext([_LAPSED])
+
+    async def fake_refresh(ctx):
+        return False
+
+    monkeypatch.setattr("gflow_cli.api.client.refresh_flow_session", fake_refresh)
+    with pytest.raises(AisandboxAuthError):
+        await c._fetch_access_token()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cached", "expect_fetch"),
+    [("2000-01-01T00:00:00+00:00", True), ("2999-01-01T00:00:00+00:00", False), (None, False)],
+)
+async def test_revive_lapsed_session_only_when_cache_says_lapsed(
+    monkeypatch, tmp_path, cached, expect_fetch
+):
+    from gflow_cli.auth.verification import SESSION_EXPIRY_FILE
+
+    if cached is not None:
+        (tmp_path / SESSION_EXPIRY_FILE).write_text(cached, encoding="utf-8")
+    c = _make_client()
+    c.profile_dir = tmp_path
+    calls: list[int] = []
+
+    async def fake_ensure():
+        calls.append(1)
+        return "ya29.X"
+
+    monkeypatch.setattr(c, "_ensure_access_token", fake_ensure)
+    await c._revive_lapsed_session()
+    assert bool(calls) is expect_fetch
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_revive_lapsed_session_never_raises(monkeypatch, tmp_path):
+    from gflow_cli.auth.verification import SESSION_EXPIRY_FILE
+
+    (tmp_path / SESSION_EXPIRY_FILE).write_text("2000-01-01T00:00:00+00:00", encoding="utf-8")
+    c = _make_client()
+    c.profile_dir = tmp_path
+
+    async def fake_ensure():
+        raise AisandboxAuthError(detail="still lapsed")
+
+    monkeypatch.setattr(c, "_ensure_access_token", fake_ensure)
+    await c._revive_lapsed_session()  # logs, does not raise
