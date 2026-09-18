@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An expired or lapsed Flow session is re-minted automatically while the Google
+  account is still signed in.** The labs.google NextAuth session lasts about a day; when
+  it lapsed, calls failed with exit 3 and the fix was clicking Flow's "Sign in" by hand —
+  a click that needs no input, because Google still holds the SSO session. `FlowApiClient`
+  now performs that round trip itself: NextAuth's own `csrf` + `signin/google` API returns
+  the Google OAuth URL, a temporary page follows it, and Google redirects straight back
+  with a fresh session, whose deadline is written to `.gflow_session_expires`. No DOM
+  selectors, so it is locale-invariant.
+
+  It fires when the session has no `access_token` **or** reports itself lapsed (past
+  `expires` / `error: ACCESS_TOKEN_REFRESH_NEEDED`) — a lapsed session still carries its
+  old token, so absence alone never triggers — and at client start when the cached
+  deadline has already passed, since cookie-authenticated tRPC calls would just 401. One
+  attempt per client, serialized across pooled pages; if Google asks for a password, 2FA,
+  CAPTCHA or an account choice it stops at once and the old exit 3 stands. Log event:
+  `auth.flow_session_refresh` (`outcome=ok|challenge|timeout|failed`).
+
+  Measured 2026-09-18 on a copy of a genuinely lapsed profile: before, past `expires` +
+  `ACCESS_TOKEN_REFRESH_NEEDED`; after, future `expires`, no `error`, no click.
+  `tests/e2e/test_auto_relogin_e2e.py` (zero credits) proves the round trip live.
+
 - **A run warns before it starts when the Flow session is about to lapse — or already
   has.** A batch that dies at clip 30 of 50 costs far more than a warning nobody needed,
   and there was no way to see the deadline coming.
@@ -19,14 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deadline), which is exactly why it only ever WARNS and never refuses: a wrong warning
   costs a glance, a wrong refusal costs the command.
 
-  **Auto-refresh was investigated and does not work**, so notice is the whole remedy.
-  Measured 2026-09-13: reading the session endpoint re-issues
+  **Re-reading the session does not refresh it** (a fresh sign-in does — see the entry
+  above). Measured 2026-09-13: reading the session endpoint re-issues
   `__Secure-next-auth.session-token` on every call (a fresh JWE each time) but never moves
   `expires` — three reads 40 s apart, deadline unchanged — so the session is absolute, not
   rolling. And on a profile that had already lapsed 2.6 hours earlier, opening that
   endpoint twice inside a real Chrome context left both `expires` and
-  `error: ACCESS_TOKEN_REFRESH_NEEDED` untouched, in the page and on disk. A lapsed
-  session cannot be revived; only a human re-login mints a new one.
+  `error: ACCESS_TOKEN_REFRESH_NEEDED` untouched, in the page and on disk. Reading cannot
+  revive a lapsed session; only a new sign-in mints one.
 
 - **`gflow auth status` now prints when the session expires.** Flow's sessions last about
   a day, and nothing told you when the next 401 was due — the deadline was only

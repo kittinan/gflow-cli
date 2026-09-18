@@ -84,6 +84,13 @@ from gflow_cli.api.video import (
 )
 from gflow_cli.api.video_extend import ExtendStarted
 from gflow_cli.auth.internal_chromium import GOOGLE_REJECTED_BROWSER_ROUTE
+from gflow_cli.auth.relogin import refresh_flow_session
+from gflow_cli.auth.verification import (
+    is_session_stale,
+    read_session_expiry,
+    record_session_expiry,
+    session_expires_at,
+)
 from gflow_cli.browser_manager import channel_for_profile
 from gflow_cli.config import BrowserEngine, Settings
 from gflow_cli.diagnostics import IncidentRecorder, run_retention, validated_incidents_root
@@ -229,6 +236,11 @@ _MIGRATION_RECHECK_BUDGET_S = 1.5
 _MIGRATION_RECHECK_POLL_S = 0.25
 
 
+def _session_unusable(data: JsonObject) -> bool:
+    """No ``access_token``, or one the session itself marks as lapsed."""
+    return not data.get("access_token") or is_session_stale(data)
+
+
 def _parse_iso_to_epoch(value: object) -> float:
     """Parse an ISO-8601 timestamp (e.g. ``/auth/session``'s ``expires``) to
     epoch seconds. Falls back to ``now + 55min`` when absent/unparseable so the
@@ -362,6 +374,11 @@ class FlowApiClient:
     transport via `page.request`). Auth = whatever cookies the profile dir
     has from a prior `gflow auth login`.
     """
+
+    # One silent NextAuth re-login per client (see _refresh_flow_session_once).
+    # Defaults live on the class; the first write shadows them per instance.
+    _relogin_lock: asyncio.Lock | None = None
+    _relogin_result: bool | None = None
 
     def __init__(
         self,
@@ -651,10 +668,11 @@ class FlowApiClient:
 
         Flow sessions last roughly a day and do not roll forward: reading the session
         endpoint re-issues the cookie but never moves `expires` (measured 2026-09-13), and
-        once the deadline passes even a real browser cannot refresh it — the same endpoint
-        keeps answering ACCESS_TOKEN_REFRESH_NEEDED. So the only cure is a human re-login,
-        and the only kindness available is notice: a batch that dies at clip 30 of 50 costs
-        far more than a warning nobody needed.
+        once the deadline passes that endpoint keeps answering ACCESS_TOKEN_REFRESH_NEEDED.
+        A fresh NextAuth sign-in DOES mint a new session while Google SSO is alive
+        (measured 2026-09-18) and :meth:`_revive_lapsed_session` attempts one — but it can
+        still need a human, and a batch that dies at clip 30 of 50 costs far more than a
+        warning nobody needed.
 
         Reads the cached deadline rather than probing, so it adds no round trip. The cache
         can be stale (a login elsewhere moves the real deadline), which is exactly why this
@@ -672,7 +690,8 @@ class FlowApiClient:
                     "client.flow_session_expired",
                     expired_at=deadline.isoformat(),
                     hint=(
-                        "run `gflow auth login --profile <name>` — a lapsed session cannot refresh"
+                        "gflow tries one silent re-sign-in; if that fails, run "
+                        "`gflow auth login --profile <name>`"
                     ),
                 )
             elif left <= EXPIRY_WARN_WINDOW:
@@ -834,6 +853,7 @@ class FlowApiClient:
         # re-minting reCAPTCHA inside each retry loop on the worker's own
         # Page; no session-id work happens in T2.)
         await self._bootstrap_and_resolve_locale()
+        await self._revive_lapsed_session()
 
         # --- Step 2: Resolve and set up transport, passing the live Page so
         # S1 can share this context rather than opening its own.
@@ -953,6 +973,23 @@ class FlowApiClient:
             account=redact_sensitive_text(email),
         )
         return True
+
+    async def _revive_lapsed_session(self) -> None:
+        """Re-sign-in before the run when the cached deadline has already passed.
+
+        The reactive refresh in :meth:`_fetch_access_token` only fires on the Bearer
+        lane; labs tRPC calls authenticate on cookies and would just 401. So when the
+        cheap pre-flight cache says the session lapsed, fetch the token now — that
+        runs the one silent re-sign-in. A failure is logged, never raised: the run then
+        behaves exactly as it did before this existed, and the cache may simply be wrong.
+        """
+        deadline = read_session_expiry(self.profile_dir)
+        if deadline is None or deadline > datetime.now(UTC):
+            return
+        try:
+            await self._ensure_access_token()
+        except AuthExpiredError:
+            logger.warning("client.lapsed_session_not_revived")
 
     async def _bootstrap_and_resolve_locale(self) -> None:
         """Navigate the bootstrap page and settle the account locale (#580, #587).
@@ -1585,6 +1622,39 @@ class FlowApiClient:
         if ctx is None:
             msg = "access-token fetch needs an active browser context."
             raise AuthMissingError(msg)
+        try:
+            status, data = await self._read_session(ctx)
+        except AisandboxAuthError:
+            # An expired session may be answered with a non-JSON page, not `{}` —
+            # that is a missing token too, so it earns the same one refresh.
+            if not await self._refresh_flow_session_once(ctx):
+                raise
+            status, data = await self._read_session(ctx)
+            refreshed = True
+        else:
+            # A LAPSED session still carries its old `access_token`, beside
+            # `error: ACCESS_TOKEN_REFRESH_NEEDED` and a past `expires` (measured
+            # 2026-09-18) — so staleness, not only absence, earns the refresh.
+            refreshed = _session_unusable(data) and await self._refresh_flow_session_once(ctx)
+            if refreshed:
+                status, data = await self._read_session(ctx)
+        if refreshed and not _session_unusable(data):
+            # Keep the pre-flight cache honest, or the next run warns about a dead
+            # deadline this one just replaced.
+            record_session_expiry(self.profile_dir, session_expires_at(data))
+        token = data.get("access_token")
+        if _session_unusable(data):
+            raise AisandboxAuthError(
+                detail="no access_token in /fx/api/auth/session (session expired?)",
+                status=status,
+                instance=_make_instance(),
+                route="auth/session",
+            )
+        return str(token), _parse_iso_to_epoch(data.get("expires"))
+
+    @staticmethod
+    async def _read_session(ctx: BrowserContext) -> tuple[int, JsonObject]:
+        """GET the BFF session; ``(status, body)`` with a non-object body as ``{}``."""
         resp = await ctx.request.get(_SESSION_API_URL)
         try:
             parsed = json.loads(await resp.text())
@@ -1595,16 +1665,22 @@ class FlowApiClient:
                 instance=_make_instance(),
                 route="auth/session",
             ) from exc
-        data = cast("JsonObject", parsed) if isinstance(parsed, dict) else {}
-        token = data.get("access_token")
-        if not token:
-            raise AisandboxAuthError(
-                detail="no access_token in /fx/api/auth/session (session expired?)",
-                status=resp.status,
-                instance=_make_instance(),
-                route="auth/session",
-            )
-        return str(token), _parse_iso_to_epoch(data.get("expires"))
+        return resp.status, cast("JsonObject", parsed) if isinstance(parsed, dict) else {}
+
+    async def _refresh_flow_session_once(self, ctx: BrowserContext) -> bool:
+        """Re-mint an expired NextAuth session while Google SSO is alive — once per client.
+
+        Serialized: pooled pages that miss the token together share one sign-in. Later
+        misses reuse its result — they may re-read the session but never start a second
+        sign-in, so a profile Google wants a human for still ends in
+        ``AisandboxAuthError`` (exit 3) instead of looping. See ``auth/relogin.py``.
+        """
+        if self._relogin_lock is None:
+            self._relogin_lock = asyncio.Lock()
+        async with self._relogin_lock:
+            if self._relogin_result is None:
+                self._relogin_result = await refresh_flow_session(ctx)
+            return self._relogin_result
 
     async def _ensure_access_token(self) -> str:
         """Return a cached access token, (re)fetching when missing or near expiry."""

@@ -124,7 +124,7 @@ def _validate_profile_in_home(profile_dir: Path) -> None:
 _REFRESH_NEEDED = "ACCESS_TOKEN_REFRESH_NEEDED"
 
 
-def _parse_expires(parsed: dict[str, Any]) -> datetime | None:
+def session_expires_at(parsed: dict[str, Any]) -> datetime | None:
     """The body's ``expires`` as an aware datetime, or None when it cannot be read.
 
     Never raises: a shape this cannot parse must leave every verdict unchanged.
@@ -142,7 +142,7 @@ def _parse_expires(parsed: dict[str, Any]) -> datetime | None:
     return deadline if deadline.tzinfo else deadline.replace(tzinfo=UTC)
 
 
-def _is_stale(parsed: dict[str, Any]) -> bool:
+def is_session_stale(parsed: dict[str, Any]) -> bool:
     """Is this 200 session body one that will answer 401 on the next real call?
 
     Two independent signals, either of which is enough:
@@ -157,7 +157,7 @@ def _is_stale(parsed: dict[str, Any]) -> bool:
     error = parsed.get("error")
     if isinstance(error, str) and error:
         return True
-    deadline = _parse_expires(parsed)
+    deadline = session_expires_at(parsed)
     return deadline is not None and deadline <= datetime.now(UTC)
 
 
@@ -197,7 +197,7 @@ def evaluate_session_response(
         return _result(FlowSessionOutcome.VERIFICATION_ERROR)
 
     parsed_dict = cast("dict[str, Any]", parsed)
-    expires_at = _parse_expires(parsed_dict)
+    expires_at = session_expires_at(parsed_dict)
     user = parsed_dict.get("user")
     if user is None or user == {}:
         # Authenticated-shaped endpoint reachable, but no Flow session.
@@ -217,7 +217,7 @@ def evaluate_session_response(
         # those same cookies answered 401 Unauthorized. Reading only `user.email` reported
         # such a profile as AUTHENTICATED, so `gflow auth login` printed success over a
         # dead session and the user learned the truth from a 401 hours later.
-        if _is_stale(parsed_dict):
+        if is_session_stale(parsed_dict):
             return _result(FlowSessionOutcome.EXPIRED, email)
         return _result(FlowSessionOutcome.AUTHENTICATED, email)
 
