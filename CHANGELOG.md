@@ -58,6 +58,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A character on the migrated host was never picked when a file shared its name.** The
+  `@` picker lists media and characters together, unranked, and the mention was committed
+  with Enter — the FIRST option. Live 2026-09-18, `@tun` offered fourteen
+  `tun_portrait-*.jpg` files before the character `Tun`, so every run refused at the chip
+  read-back (exit 32, no credits spent) and a character with a common name was unusable.
+  The gesture now opens the picker's **Characters** tab (by its `accessibility_new`
+  ligature, so any locale), searches in the picker's own box, and clicks the option whose
+  title matches exactly; a miss is closed with Escape, which also drops the `@`, rather than
+  Backspace, which could eat a chip. The entity kind + id read-back is unchanged. Verified
+  live: `video t2v --model veo-lite-lp --reference-entity … --reference-entity-name tun` →
+  exit 0, 8 s 720x1280 clip carrying the character.
+
 - **`gflow auth login` could not mint a session at all, and then reported success
   anyway.** Two independent faults that combined into a silent one.
 

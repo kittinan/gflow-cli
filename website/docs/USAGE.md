@@ -814,9 +814,16 @@ gflow video r2v "blend these worlds" --ref a.png --ref b.png --ref c.png --model
 > `--reference-entity-name <name>`. The name is not optional on this host: Flow's picker
 > searches by display name and offers no id to anchor on, so without one there is nothing
 > to type and the request is refused (exit 36) rather than submitted without the
-> character. The chip the picker commits is then read back and checked to carry
-> `data-reference-type="entity"` with the id you asked for — Flow lists characters and
-> media under one search and does not rank them, so a file sharing the name can win.
+> character. Flow lists characters and media under one search and does not rank them —
+> `@tun` once offered fourteen `tun_portrait-*.jpg` files before the character — so gflow
+> narrows the picker to its **Characters** tab before searching, picks the option whose
+> name matches exactly, and then reads the chip back to check it carries
+> `data-reference-type="entity"` with the id you asked for.
+>
+> **Do not also write `@<name>` in the prompt text.** A prompt `@mention` is resolved
+> against the character catalog, which is read through a labs route Flow has retired on
+> migrated accounts, so it fails with exit 29 before anything is submitted. The
+> `--reference-entity` flags alone put the character on the generation.
 >
 > **`--duration 4` and `--duration 6` are refused on this path (exit 11).** At those two
 > lengths the host does not refuse — it drops the references, types their file *names*

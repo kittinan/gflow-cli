@@ -238,6 +238,14 @@ BOUND_CHIP = "flow-prompt-box button.chip-container:has(img)"
 PICKER = "flow-add-menu-popover-content"
 PICKER_SEARCH = "input[type='text']"
 PICKER_OPTION = "button.asset-item[role='option']"
+#: An option's own title: the asset's NAME (user data, never a translated label).
+PICKER_OPTION_TITLE = ".asset-title"
+#: The picker's category rail narrowed to characters, by its icon ligature (siblings:
+#: dashboard, image, videocam, voice_selection, face, drive_folder_upload). Measured
+#: 2026-09-18: ``@tun`` listed fourteen ``tun_portrait-*.jpg`` files BEFORE the
+#: character ``Tun``, and Enter commits the first option — so without this tab a
+#: character whose name any file shares can never be picked. With it, one option.
+PICKER_CHARACTERS_TAB = f"{PICKER} [role='tab']:has(mat-icon:text-is('accessibility_new'))"
 #: The Ingredients sub-mode holds references; Frames holds the i2v chips.
 INGREDIENTS_LIGATURE = "chrome_extension"
 #: The only duration at which this host offers reference-to-video. Measured 2026-09-06 at
@@ -1843,9 +1851,9 @@ class MigratedComposer:
     ) -> None:
         """Mention each character by name, then prove the chip is that ENTITY (#723).
 
-        The gesture is the same one references use — ``@``, the name, **Enter** — because
-        the migrated composer has one picker for everything. What differs is the
-        verification, and it is not optional:
+        The migrated composer has one picker for everything, so the gesture starts like a
+        reference's — ``@`` — and then narrows to the Characters tab before searching
+        (:meth:`_mention_character`). The verification after it is not optional either:
 
         **Flow lists characters and media in that one picker and does not rank them.**
         Measured 2026-09-07: the same ``@Kael`` query committed
@@ -1864,7 +1872,7 @@ class MigratedComposer:
         # them would silently drop references the caller asked for.
         base = len(await self.read_chips(page))
         for i, name in enumerate(names):
-            await self._mention_by_name(page, name, expect_chips=base + i + 1)
+            await self._mention_character(page, name, expect_chips=base + i + 1)
 
         chips = (await self.read_chips(page))[base:]
         not_entities = [c for c in chips if c.get("reference_type") != "entity"]
@@ -2013,6 +2021,74 @@ class MigratedComposer:
             "  reference_type: c.getAttribute('data-reference-type') || '',"
             "}))",
             MENTION_CHIP,
+        )
+
+    async def _mention_character(self, page: Page, name: str, *, expect_chips: int) -> None:
+        """Insert one CHARACTER chip for *name*: ``@``, the Characters tab, search, click.
+
+        Not Enter: Enter commits the first option, and the unfiltered list puts files
+        sharing the name ahead of the character (measured 2026-09-18). Clicking the tab
+        moves focus off the composer, so the query goes into the picker's own search box.
+        The option is chosen by its exact title when several characters match, and taken
+        only when it is the sole option otherwise. On a miss, Escape closes the picker AND
+        drops the ``@`` (measured) — no Backspace, which could delete a chip.
+        """
+        offered: list[str] = []
+        chips = await self.read_chips(page)
+        for attempt in range(1, FRAME_SEARCH_ATTEMPTS + 1):
+            await page.locator(COMPOSER).first.click(timeout=5000)
+            await page.keyboard.type("@", delay=120)
+            await page.wait_for_timeout(2200)
+            tab = page.locator(PICKER_CHARACTERS_TAB)
+            if not await tab.count():
+                await page.keyboard.press("Escape")
+                raise UiSelectorDriftError(
+                    detail=(
+                        "migrated host: the @ picker shows no Characters tab "
+                        "(mat-icon 'accessibility_new'), so a character cannot be told "
+                        "apart from files sharing its name. Refusing rather than guessing"
+                    ),
+                )
+            await tab.first.click(timeout=5000)
+            await page.wait_for_timeout(1500)
+            await page.locator(f"{PICKER} {PICKER_SEARCH}").first.fill(name)
+            await page.wait_for_timeout(2500)
+            offered = [
+                t.strip()
+                for t in await page.locator(
+                    f"{PICKER_OPTION} {PICKER_OPTION_TITLE}"
+                ).all_text_contents()
+            ]
+            exact = [i for i, t in enumerate(offered) if t.casefold() == name.casefold()]
+            pick = exact[0] if exact else (0 if len(offered) == 1 else None)
+            if pick is not None:
+                await page.locator(PICKER_OPTION).nth(pick).click(timeout=5000)
+                await page.wait_for_timeout(2000)
+                confirm = page.locator(PICKER_CONFIRM)
+                if await confirm.count():
+                    await confirm.first.click(timeout=5000)
+                    await page.wait_for_timeout(1500)
+            chips = await self.read_chips(page)
+            if len(chips) == expect_chips:
+                return
+            log.info(
+                "migrated.character_mention_miss",
+                name=name,
+                attempt=attempt,
+                chips=len(chips),
+                offered=len(offered),
+            )
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(800)
+            if attempt < FRAME_SEARCH_ATTEMPTS:
+                await page.wait_for_timeout(FRAME_SEARCH_RETRY_PAUSE_S * 1000)
+        raise ReferenceNotFoundError(
+            detail=(
+                f"migrated host: character {name!r} did not attach in "
+                f"{FRAME_SEARCH_ATTEMPTS} attempts ({len(chips)} chip(s), expected "
+                f"{expect_chips}); the Characters tab offered: "
+                f"{', '.join(offered[:6]) or '<nothing>'}"
+            ),
         )
 
     async def _mention_by_name(self, page: Page, name: str, *, expect_chips: int) -> None:

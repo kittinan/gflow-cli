@@ -17,7 +17,7 @@ import pytest
 
 from gflow_cli.api.transports.migrated_composer import FRAME_SEARCH_ATTEMPTS
 from gflow_cli.api.video import Aspect, GenerateVideoRequest, Mode, VideoModel
-from gflow_cli.errors import ReferenceNotFoundError
+from gflow_cli.errors import ReferenceNotFoundError, UiSelectorDriftError
 
 pytestmark = pytest.mark.anyio
 
@@ -304,61 +304,200 @@ async def test_the_prompt_is_appended_so_the_mentions_survive() -> None:
 # --- character entities (#723) ----------------------------------------------
 
 
-class FakeEntityPage(FakeComposerPage):
-    """A composer whose picker commits CHARACTER ENTITIES rather than media.
+class _PickerOption:
+    def __init__(self, title: str, kind: str, entity_id: str = "") -> None:
+        self.title, self.kind, self.entity_id = title, kind, entity_id
 
-    Modelled on the 2026-09-07 capture: `@` + the character's name + Enter inserts
-    ``<span class="mention-chip" data-reference-type="entity" data-entity-id="...">``,
-    and the aborted ``MZZa6b`` submit carried that id in its own reference slot.
+
+class _CharLoc:
+    def __init__(self, page: FakeCharacterPickerPage, kind: str, items: list[Any]) -> None:
+        self.page, self.kind, self.items = page, kind, items
+
+    @property
+    def first(self) -> _CharLoc:
+        return _CharLoc(self.page, self.kind, self.items[:1])
+
+    def nth(self, i: int) -> _CharLoc:
+        return _CharLoc(self.page, self.kind, self.items[i : i + 1])
+
+    async def count(self) -> int:
+        return len(self.items)
+
+    async def all_text_contents(self) -> list[str]:
+        return [str(i) for i in self.items]
+
+    async def fill(self, text: str) -> None:
+        self.page.searches += 1
+        self.page.query = text
+
+    async def click(self, **_: Any) -> None:
+        if self.kind == "tab":
+            self.page.tab_clicks += 1
+            self.page.tab_selected = True
+        elif self.kind == "option":
+            opt: _PickerOption = self.items[0]
+            self.page.chips.append(
+                {"text": opt.title, "entity_id": opt.entity_id, "reference_type": opt.kind}
+            )
+
+
+class FakeCharacterPickerPage:
+    """The migrated ``@`` picker as measured live on 2026-09-18.
+
+    One popover lists media and characters together, unranked: ``@tun`` offered fourteen
+    ``tun_portrait-*.jpg`` files BEFORE the character ``Tun``, so Enter (which commits the
+    first option) always took a file. The category rail's Characters tab narrows the list
+    to characters; clicking an option commits it as a chip, and Escape on a miss removes
+    the ``@`` by itself.
     """
 
-    def __init__(self, *, entities: dict[str, str], **kw: Any) -> None:
-        super().__init__(assets=[f"{n}Character" for n in entities], **kw)
-        self._entities = entities
-        self._order = list(entities)
+    def __init__(
+        self,
+        library: list[_PickerOption],
+        *,
+        has_tab: bool = True,
+        tab_filters: bool = True,
+        miss_first: int = 0,
+    ) -> None:
+        self.keyboard = FakeKeyboard(self)  # type: ignore[arg-type]
+        self.library = library
+        self.has_tab, self.tab_filters, self.miss_first = has_tab, tab_filters, miss_first
+        self.typed: list[str] = []
+        self.chips: list[dict[str, str]] = []
+        self.tab_selected = False
+        self.query = ""
+        self.searches = 0
+        self.tab_clicks = 0
 
     def on_enter(self) -> None:
-        self.enters += 1
-        if self.enters <= self.miss_first:
-            return
-        for _ in range(self.chips_per_enter):
-            name = self._order[len(self.chips) % len(self._order)]
-            self.chips.append(
-                {
-                    "text": name,
-                    "entity_id": self._entities[name],
-                    "reference_type": "entity",
-                }
-            )
+        raise AssertionError("Enter commits the FIRST option — it must not be used here")
+
+    def _options(self) -> list[_PickerOption]:
+        if self.searches <= self.miss_first:
+            return []
+        found = [o for o in self.library if self.query.casefold() in o.title.casefold()]
+        if self.tab_selected and self.tab_filters:
+            found = [o for o in found if o.kind == "entity"]
+        return found
+
+    def locator(self, css: str) -> _CharLoc:
+        from gflow_cli.api.transports import migrated_composer as mc
+
+        if css == mc.COMPOSER:
+            return _CharLoc(self, "composer", ["composer"])
+        if css == mc.PICKER_CHARACTERS_TAB:
+            return _CharLoc(self, "tab", ["tab"] if self.has_tab else [])
+        if css == f"{mc.PICKER} {mc.PICKER_SEARCH}":
+            return _CharLoc(self, "search", ["search"])
+        if css == f"{mc.PICKER_OPTION} {mc.PICKER_OPTION_TITLE}":
+            return _CharLoc(self, "title", [o.title for o in self._options()])
+        if css == mc.PICKER_OPTION:
+            return _CharLoc(self, "option", self._options())
+        if css == mc.PICKER_CONFIRM:
+            return _CharLoc(self, "confirm", [])
+        raise AssertionError(f"unmodelled selector: {css!r}")
+
+    async def wait_for_timeout(self, _ms: float) -> None:
+        return None
+
+    async def evaluate(self, _script: str, _arg: Any = None) -> Any:
+        return self.chips
+
+
+def _tun_project() -> list[_PickerOption]:
+    """The live 2026-09-18 listing for ``tun``: files first, the character last."""
+    files = [_PickerOption(f"tun_portrait-{i:08x}.jpg", "media") for i in range(14)]
+    return [*files, _PickerOption("Tun", "entity", "42a8618b")]
+
+
+async def test_character_is_picked_even_when_files_sharing_its_name_are_listed_first() -> None:
+    """The live failure: Enter committed ``tun_portrait-bbd47565.jpg`` instead of Tun."""
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakeCharacterPickerPage(_tun_project())
+    await MigratedComposer().attach_character_entities(
+        page,  # type: ignore[arg-type]
+        entity_ids=("42a8618b",),
+        names=("tun",),
+    )
+    assert page.chips == [{"text": "Tun", "entity_id": "42a8618b", "reference_type": "entity"}]
+    assert page.tab_clicks == 1
 
 
 async def test_character_mentions_land_as_entity_chips() -> None:
     """The whole point: the chip must carry the ENTITY id, not merely exist."""
     from gflow_cli.api.transports.migrated_composer import MigratedComposer
 
-    page = FakeEntityPage(entities={"Kael": "ent-kael", "Naia": "ent-naia"})
+    page = FakeCharacterPickerPage(
+        [_PickerOption("Kael", "entity", "ent-kael"), _PickerOption("Naia", "entity", "ent-naia")]
+    )
     await MigratedComposer().attach_character_entities(
-        page, entity_ids=("ent-kael", "ent-naia"), names=("Kael", "Naia")
+        page,  # type: ignore[arg-type]
+        entity_ids=("ent-kael", "ent-naia"),
+        names=("Kael", "Naia"),
     )
     assert [c["entity_id"] for c in page.chips] == ["ent-kael", "ent-naia"]
     assert {c["reference_type"] for c in page.chips} == {"entity"}
 
 
-async def test_a_media_chip_where_a_character_was_asked_for_is_refused() -> None:
-    """Flow's picker lists characters and media TOGETHER and does not rank them.
+async def test_the_exact_name_wins_over_a_character_that_merely_contains_it() -> None:
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
 
-    Measured 2026-09-07: the same ``@Kael`` query returned ``reference_type="entity"``
-    on one gesture and ``reference_type="media"`` — a JPEG that merely shared the name —
-    on another. Committing the file would generate a clip that looks right and drifts on
-    the next cut, which is the exact failure characters exist to prevent. So a chip that
-    is not an entity is refused before any submit.
+    page = FakeCharacterPickerPage(
+        [_PickerOption("Tun Junior", "entity", "ent-jr"), _PickerOption("Tun", "entity", "ent-tun")]
+    )
+    await MigratedComposer().attach_character_entities(
+        page,  # type: ignore[arg-type]
+        entity_ids=("ent-tun",),
+        names=("Tun",),
+    )
+    assert [c["entity_id"] for c in page.chips] == ["ent-tun"]
+
+
+async def test_a_late_index_is_retried_with_escape_never_backspace() -> None:
+    """Escape on a miss drops the ``@`` by itself (measured); a Backspace could eat a chip."""
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakeCharacterPickerPage(_tun_project(), miss_first=1)
+    await MigratedComposer().attach_character_entities(
+        page,  # type: ignore[arg-type]
+        entity_ids=("42a8618b",),
+        names=("tun",),
+    )
+    assert page.searches == 2 and len(page.chips) == 1
+    after_first_at = page.typed[page.typed.index("@") :]
+    assert "<Escape>" in after_first_at
+    assert "<Backspace>" not in after_first_at  # the up-front clear_composer is separate
+
+
+async def test_no_characters_tab_is_selector_drift_not_a_guess() -> None:
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakeCharacterPickerPage(_tun_project(), has_tab=False)
+    with pytest.raises(UiSelectorDriftError, match="accessibility_new"):
+        await MigratedComposer().attach_character_entities(
+            page,  # type: ignore[arg-type]
+            entity_ids=("42a8618b",),
+            names=("tun",),
+        )
+    assert page.chips == []
+
+
+async def test_a_media_chip_where_a_character_was_asked_for_is_refused() -> None:
+    """Belt and braces: if the tab ever stops filtering, the chip read-back still refuses.
+
+    Measured 2026-09-07: the same ``@Kael`` query committed an entity on one gesture and
+    a JPEG sharing the name on another. A media chip where a character was asked for is
+    a clip that looks right and drifts on the next cut, so it never reaches submit.
     """
     from gflow_cli.api.transports.migrated_composer import MigratedComposer
 
-    page = FakeComposerPage(assets=["kael_ref.jpgImage"])  # commits MEDIA chips
+    page = FakeCharacterPickerPage([_PickerOption("Kael", "media")], tab_filters=False)
     with pytest.raises(ReferenceNotFoundError, match="media"):
         await MigratedComposer().attach_character_entities(
-            page, entity_ids=("ent-kael",), names=("Kael",)
+            page,  # type: ignore[arg-type]
+            entity_ids=("ent-kael",),
+            names=("Kael",),
         )
 
 
@@ -366,10 +505,12 @@ async def test_the_wrong_entity_is_refused_even_though_a_chip_landed() -> None:
     """A chip of the right KIND is not proof it is the right PERSON."""
     from gflow_cli.api.transports.migrated_composer import MigratedComposer
 
-    page = FakeEntityPage(entities={"Kael": "ent-someone-else"})
+    page = FakeCharacterPickerPage([_PickerOption("Kael", "entity", "ent-someone-else")])
     with pytest.raises(ReferenceNotFoundError, match="ent-kael"):
         await MigratedComposer().attach_character_entities(
-            page, entity_ids=("ent-kael",), names=("Kael",)
+            page,  # type: ignore[arg-type]
+            entity_ids=("ent-kael",),
+            names=("Kael",),
         )
 
 
