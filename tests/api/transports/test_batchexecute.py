@@ -190,6 +190,32 @@ def test_record_matches_by_shape_not_position() -> None:
     assert rec.workflow_id == WF and rec.is_running
 
 
+def test_record_with_a_null_step_marker_still_resolves() -> None:
+    """Captured 2026-10-03 (MZZa6b, t2v + character and r2v + avatar): slot 3 is null.
+
+    Flow used to send ``"CAE"`` there; every submit since replies ``null``, and gflow
+    read an accepted, billed submit as wire drift (exit 7) while the clip rendered.
+    """
+    from gflow_cli.api.transports.batchexecute import generation_record
+
+    record = _record(6)
+    record[3] = None
+    payload = submit_payload()
+    payload[3] = [[record]]
+    rec = generation_record("MZZa6b", payload)
+    assert (rec.workflow_id, rec.project_id, rec.media_id) == (WF, PROJ, MEDIA)
+    assert rec.status == 6
+
+
+def test_the_submit_listing_row_is_not_mistaken_for_the_record() -> None:
+    """``[uuid, null, null, [title, …], project]`` precedes the record; it has no ids."""
+    from gflow_cli.api.transports.batchexecute import generation_record
+
+    listing_only = submit_payload()[:3]
+    with pytest.raises(WireFormatError):
+        generation_record("MZZa6b", listing_only)
+
+
 # --- error envelopes: a refusal is a frame with a null payload -----------------------
 #
 # Captured 2026-09-27 on ``ogiZ0b`` with a tampered reCAPTCHA token (spike

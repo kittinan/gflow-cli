@@ -12,7 +12,8 @@ Three rpcids matter for a generation (spike 2026-09-05-migrated-host-wire-protoc
 * ``as29s`` — the result; the bare record, now carrying signed CDN URLs
 
 The record itself is ``[workflow_id, project_id, media_id, "CAE", null, DETAILS, null,
-MEDIA_INFO]`` and is located **by that shape**, not by position, so a wrapper change
+MEDIA_INFO]`` (slot 3 is ``null`` instead of ``"CAE"`` since 2026-10-03) and is located
+**by that shape**, not by position, so a wrapper change
 does not break the parser. ``DETAILS[8]`` is ``[status]`` (6 submitted, 2 running,
 3 done), ``DETAILS[10]`` the signed **poster** (JPEG) URL once done, ``DETAILS[13]``
 the mp4 byte size; ``MEDIA_INFO[0][8]`` the signed **video** URL (``MEDIA_INFO[0][12]`` carries
@@ -185,7 +186,9 @@ def rpc_errors(text: str) -> list[RpcError]:
 
 
 def _is_record(node: list[Any]) -> bool:
-    if len(node) < 6 or node[3] != "CAE":
+    # The three uuids are the anchor. Slot 3 was the step marker "CAE" until Flow began
+    # sending null there (2026-10-03, every MZZa6b submit); either is the record.
+    if len(node) < 6 or node[3] not in ("CAE", None):
         return False
     return all(isinstance(node[i], str) and _UUID_RE.match(node[i]) for i in (0, 1, 2))
 
