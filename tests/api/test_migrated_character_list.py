@@ -141,36 +141,40 @@ class _Resp:
         return self._body
 
 
-class _RespInfo:
-    def __init__(self, resp: _Resp) -> None:
-        self._resp = resp
+class _Route:
+    """A request the page routed to gflow: ``fetch`` replays it, ``fulfill`` answers the app."""
 
-    @property
-    async def value(self) -> _Resp:
-        return self._resp
+    def __init__(self, reply: _Resp) -> None:
+        self.reply, self.fulfilled_with = reply, None
 
+    async def fetch(self) -> _Resp:
+        return self.reply
 
-class _Expect:
-    def __init__(self, page: _Page, predicate: Any) -> None:
-        self.page, self.predicate = page, predicate
-
-    async def __aenter__(self) -> _RespInfo:
-        assert self.predicate(self.page.reply)
-        return _RespInfo(self.page.reply)
-
-    async def __aexit__(self, *_: Any) -> None:
-        return None
+    async def fulfill(self, *, response: _Resp, body: str) -> None:
+        self.fulfilled_with = body
 
 
 class _Page:
     def __init__(self, reply: _Resp) -> None:
         self.reply, self.gotos, self.closed = reply, [], False
+        self.routes: list[_Route] = []
+        self._handlers: list[tuple[Any, Any]] = []
 
-    def expect_response(self, predicate: Any, **_: Any) -> _Expect:
-        return _Expect(self, predicate)
+    def expect_response(self, *_: Any, **__: Any) -> Any:
+        # Chrome evicts a >10 MB body from its inspector cache before it can be read
+        # (measured 2026-10-03: a 13.5 MB Zzl0ze), so this path must never be taken.
+        raise AssertionError("expect_response cannot read a large Zzl0ze body")
+
+    async def route(self, predicate: Any, handler: Any) -> None:
+        self._handlers.append((predicate, handler))
 
     async def goto(self, url: str, **_: Any) -> None:
         self.gotos.append(url)
+        for predicate, handler in self._handlers:
+            if predicate(self.reply.url):
+                route = _Route(self.reply)
+                self.routes.append(route)
+                await handler(route)
 
     async def close(self) -> None:
         self.closed = True
@@ -202,6 +206,8 @@ async def test_fetch_keeps_the_apps_own_project_load_reply() -> None:
     payload = await c._fetch_migrated_project_data(PID)
     assert [ch.display_name for ch in parse_migrated_characters(payload, PID)] == ["Tun"]
     assert page.gotos == [f"https://flow.google.com/project/{PID}"]
+    # The app still receives the reply it asked for — gflow only reads it on the way.
+    assert [r.fulfilled_with for r in page.routes] == [page.reply._body]
     assert page.closed
 
 

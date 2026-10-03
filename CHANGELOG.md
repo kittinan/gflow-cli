@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every flow.google.com video submit failed with exit 7 while the clip rendered
+  anyway.** Since 2026-10-03 the submit reply's generation record carries `null` where it
+  carried the step marker `"CAE"`, and the parser required `"CAE"` — so an accepted,
+  billed submit was reported as wire drift and never downloaded. The record is still
+  located by its three ids; slot 3 may now be either. Live 2026-10-03: `video r2v` with a
+  `--reference-entity` character on `veo-lite-lp` (8 s) and with `--avatar` on
+  `omni-flash` (10 s), both exit 0 with the clip on disk.
+- **`character list` crashed on a large project** ("Request content was evicted from
+  inspector cache"). Chrome keeps no body over ~10 MB for inspection, and a project's
+  `Zzl0ze` load measured 13.5 MB. The reply is now read through a route as it arrives
+  and handed on to the page unchanged.
+
 ### Added
 
 - **An expired or lapsed Flow session is re-minted automatically while the Google

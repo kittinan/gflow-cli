@@ -140,6 +140,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from _typeshed import DataclassInstance
+    from playwright.async_api import Route
 
     from gflow_cli.api.image import AgentInstruction, GenerateImageRequest, ImageRef, ProjectBrief
     from gflow_cli.api.video import (
@@ -3286,16 +3287,27 @@ class FlowApiClient:
             msg = "FlowApiClient not entered — use `async with`"
             raise RuntimeError(msg)
         page = await ctx.new_page()
+        reply: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+        async def keep_reply(route: Route) -> None:
+            # Routed, not `expect_response`: Chrome drops a body over ~10 MB from its
+            # inspector cache, so `Response.text()` fails with "evicted" — measured
+            # 2026-10-03 on a project whose Zzl0ze was 13.5 MB. `route.fetch` reads it
+            # off the wire and hands the app the same reply.
+            response = await route.fetch()
+            body = await response.text()
+            if not reply.done():
+                reply.set_result(body)
+            await route.fulfill(response=response, body=body)
+
         try:
-            async with page.expect_response(
-                lambda r: "rpcids=Zzl0ze" in r.url, timeout=45_000
-            ) as info:
-                await page.goto(
-                    MIGRATED_PROJECT_URL.format(project_id=project_id),
-                    wait_until="domcontentloaded",
-                    timeout=45_000,
-                )
-            body = await (await info.value).text()
+            await page.route(lambda url: "rpcids=Zzl0ze" in url, keep_reply)
+            await page.goto(
+                MIGRATED_PROJECT_URL.format(project_id=project_id),
+                wait_until="domcontentloaded",
+                timeout=45_000,
+            )
+            body = await asyncio.wait_for(reply, timeout=45)
         finally:
             with contextlib.suppress(Exception):
                 await page.close()
