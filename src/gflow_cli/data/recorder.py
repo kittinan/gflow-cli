@@ -28,7 +28,7 @@ from gflow_cli.data.redaction import (
 )
 from gflow_cli.data.repository import DataRepository
 from gflow_cli.data.store import DataStore
-from gflow_cli.errors import GFlowError, MediaAttributionError
+from gflow_cli.errors import GFlowError, MediaAttributionError, MediaDownloadError
 from gflow_cli.observability import exception_message_hash
 
 if TYPE_CHECKING:
@@ -371,6 +371,12 @@ class OperationRecorder:
             metadata["entity_ids"] = list(request.reference_entities)
         if request.reference_entity_names:
             metadata["entity_names"] = list(request.reference_entity_names)
+        # #913: a generation made from another image keeps that image's media id here
+        # too, so the lineage survives even when the parent's asset row is missing (its
+        # download failed, so there is no local file to record it with).
+        refs = getattr(request, "refs", ())
+        if refs:
+            metadata["reference_media_ids"] = [ref.name for ref in refs]
         return metadata
 
     # ------------------------------------------------------------------
@@ -785,6 +791,13 @@ class OperationRecorder:
                 ),
             )
 
+        # A start for a media id the catalog already holds adds nothing: the generation
+        # is recorded. Re-writing the row would reset a completed clip to "pending" and
+        # drop its metadata, and a second STARTED operation would never be resolved.
+        # Before #898 this raised DataIntegrityError (a fresh id for a recorded media id
+        # violates UNIQUE(profile_name, flow_media_id)).
+        if repo.get_asset_by_flow_media_id(profile_name, started.media_id) is not None:
+            return
         asset_id = _new_id()
         repo.upsert_asset(
             AssetRecord(
@@ -792,7 +805,7 @@ class OperationRecorder:
                 profile_name=profile_name,
                 flow_project_id=started.project_id,
                 flow_media_id=started.media_id,
-                flow_workflow_id=None,
+                flow_workflow_id=started.workflow_id,
                 flow_media_generation_id=None,
                 kind=AssetKind.VIDEO,
                 status="pending",
@@ -942,7 +955,9 @@ class OperationRecorder:
                 profile_name=profile_name,
                 flow_project_id=result.project_id,
                 flow_media_id=flow_media_id,
-                flow_workflow_id=None,
+                # Never clobber the id the start recorded with None (#898).
+                flow_workflow_id=result.workflow_id
+                or (existing_asset.flow_workflow_id if existing_asset is not None else None),
                 flow_media_generation_id=None,
                 kind=AssetKind.VIDEO,
                 status=result.status.status,
@@ -1045,7 +1060,6 @@ class OperationRecorder:
         completed_at = _now_utc_iso()
         repo = self.repository
         repo.upsert_profile(profile_name, profile_dir)
-
         recorded = False
         for media_id in flow_media_ids:
             op = repo.get_operation_for_output_asset(profile_name, media_id, mode)
@@ -1058,6 +1072,14 @@ class OperationRecorder:
                 recorded = True
             elif op.status == OperationStatus.FAILED:
                 recorded = True  # already terminal — do not duplicate
+        if isinstance(exc, MediaDownloadError) and exc.media_id:
+            # #896: Flow said DONE and billed; only the transfer failed. Without this the
+            # asset reads "pending" forever and nothing distinguishes it from a failed
+            # generation. Same vocabulary record_completed_video writes. Runs after the
+            # operation write, which matters more if a busy store fails one of the two.
+            repo.update_asset_status(
+                profile_name, exc.media_id, "MEDIA_GENERATION_STATUS_SUCCESSFUL"
+            )
         if recorded:
             return
 

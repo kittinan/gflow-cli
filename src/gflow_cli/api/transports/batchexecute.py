@@ -90,8 +90,8 @@ def _as_list(node: object) -> list[Any] | None:
     return cast("list[Any]", node) if isinstance(node, list) else None
 
 
-def parse_frames(text: str) -> list[tuple[str, Any]]:
-    """Every ``wrb.fr`` frame in a batchexecute body as ``(rpcid, decoded payload)``.
+def _wrb_rows(text: str) -> list[list[Any]]:
+    """Every ``["wrb.fr", "<rpcid>", …]`` row in a batchexecute body, undecoded.
 
     Lenient on purpose: chunk-length lines are skipped rather than trusted, each
     line that starts a JSON array is decoded on its own, and anything that is not
@@ -104,7 +104,7 @@ def parse_frames(text: str) -> list[tuple[str, Any]]:
     if body.startswith(_XSSI_PREFIX):
         body = body[len(_XSSI_PREFIX) :]
     decoder = json.JSONDecoder()
-    frames: list[tuple[str, Any]] = []
+    rows: list[list[Any]] = []
     for raw in body.splitlines():
         line = raw.strip()
         if not line.startswith("["):
@@ -113,24 +113,75 @@ def parse_frames(text: str) -> list[tuple[str, Any]]:
             decoded, _ = decoder.raw_decode(line)
         except ValueError:
             continue
-        chunk = _as_list(decoded)
-        if chunk is None:
-            continue
-        for raw_item in chunk:
+        for raw_item in _as_list(decoded) or []:
             item = _as_list(raw_item)
             if (
                 item is not None
                 and len(item) >= 3
                 and item[0] == "wrb.fr"
                 and isinstance(item[1], str)
-                and isinstance(item[2], str)
             ):
-                try:
-                    payload: Any = json.loads(item[2])
-                except ValueError:
-                    payload = None
-                frames.append((item[1], payload))
+                rows.append(item)
+    return rows
+
+
+def parse_frames(text: str) -> list[tuple[str, Any]]:
+    """Every ``wrb.fr`` frame in a batchexecute body as ``(rpcid, decoded payload)``.
+
+    A frame whose payload is null is an error envelope, not a reply: it is left out
+    here and read by :func:`rpc_errors`.
+    """
+    frames: list[tuple[str, Any]] = []
+    for item in _wrb_rows(text):
+        if not isinstance(item[2], str):
+            continue
+        try:
+            payload: Any = json.loads(item[2])
+        except ValueError:
+            payload = None
+        frames.append((item[1], payload))
     return frames
+
+
+@dataclass(frozen=True)
+class RpcError:
+    """A ``wrb.fr`` frame with a null payload: the RPC failed, and slot 5 says how.
+
+    ``code`` is the gRPC status, ``reasons`` the ``google.rpc.ErrorInfo`` reasons. The
+    refusal shape, captured 2026-09-27 on a submit Flow refused (HTTP 200)::
+
+        ["wrb.fr","ogiZ0b",null,null,null,
+         [7,null,[["type.googleapis.com/google.rpc.ErrorInfo",["PUBLIC_ERROR_UNUSUAL_ACTIVITY"]]]],
+         "generic"]
+
+    A status with no reason is NOT a refusal by itself: the #723 entity submit Flow
+    queued and ran replies ``[5]``.
+    """
+
+    rpcid: str
+    code: int | None
+    reasons: tuple[str, ...]
+
+
+def _strings(node: object) -> list[str]:
+    """Every string anywhere under ``node``, depth-first."""
+    if isinstance(node, str):
+        return [node]
+    return [s for child in _as_list(node) or [] for s in _strings(child)]
+
+
+def rpc_errors(text: str) -> list[RpcError]:
+    """Every error envelope in a batchexecute body — the frames :func:`parse_frames` skips."""
+    errors: list[RpcError] = []
+    for item in _wrb_rows(text):
+        status = _as_list(item[5]) if item[2] is None and len(item) > 5 else None
+        if not status:
+            continue
+        code = status[0] if isinstance(status[0], int) else None
+        details = status[2] if len(status) > 2 else None
+        reasons = tuple(s for s in _strings(details) if not s.startswith("type.googleapis.com/"))
+        errors.append(RpcError(item[1], code, reasons))
+    return errors
 
 
 def _is_record(node: list[Any]) -> bool:

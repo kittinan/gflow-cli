@@ -97,7 +97,7 @@ from gflow_cli.auth.verification import (
     record_session_expiry,
     session_expires_at,
 )
-from gflow_cli.browser_manager import channel_for_profile
+from gflow_cli.browser_manager import channel_for_profile, window_position_args
 from gflow_cli.config import BrowserEngine, Settings
 from gflow_cli.diagnostics import IncidentRecorder, run_retention, validated_incidents_root
 from gflow_cli.errors import (
@@ -113,6 +113,7 @@ from gflow_cli.errors import (
     FlowApiError,  # re-exported via gflow_cli.api.__init__
     FlowHostMigratedError,
     NetworkError,
+    ProfileAccessError,
     ProfileLockedError,
     RateLimitError,
     SceneConcatError,
@@ -140,7 +141,7 @@ if TYPE_CHECKING:
 
     from _typeshed import DataclassInstance
 
-    from gflow_cli.api.image import AgentInstruction, GenerateImageRequest, ProjectBrief
+    from gflow_cli.api.image import AgentInstruction, GenerateImageRequest, ImageRef, ProjectBrief
     from gflow_cli.api.video import (
         GenerateVideoRequest,
         VideoResult,
@@ -178,6 +179,17 @@ _TARGET_CLOSED_MARKERS = (
     "Target page, context or browser has been closed",
     "Target closed",
 )
+
+
+def _is_profile_access_denied(exc: BaseException) -> bool:
+    """True when Chrome's ProcessSingleton failed because the profile is read-only.
+
+    Matches the Win32 code (ERROR_ACCESS_DENIED = 5), never the message text: Chrome
+    embeds the OS's *localized* description (``拒绝访问。 (0x5)``, ``Acesso negado.
+    (0x5)``), so only the code is the same on every Windows display language.
+    """
+    message = str(exc)
+    return "ProcessSingleton" in message and ("(0x5)" in message or "Error code: 5" in message)
 
 
 def _is_target_closed(exc: BaseException) -> bool:
@@ -547,6 +559,7 @@ class FlowApiClient:
                 # (exit 256) into software rendering. Added only under vglrun
                 # (VGL_ISACTIVE=1) so hardware GPU acceleration works; inert otherwise.
                 *(["--disable-gpu-sandbox"] if os.environ.get("VGL_ISACTIVE") == "1" else []),
+                *window_position_args(self.settings.browser_window_position),
             ],
         }
         if self.settings.har_path is not None:
@@ -1183,11 +1196,20 @@ class FlowApiClient:
         return after
 
     async def _launch_persistent_context(self, kwargs: JsonObject) -> BrowserContext:
-        """Launch the persistent context; translate a launch-time crash into ProfileLockedError."""
+        """Launch the context and classify profile access versus contention failures."""
         assert self._pw is not None
         try:
             return await self._pw.chromium.launch_persistent_context(**kwargs)
         except Exception as exc:
+            # Before _is_target_closed: an access denial can arrive as a
+            # TargetClosedError too, and must not be reported as contention.
+            if _is_profile_access_denied(exc):
+                raise ProfileAccessError(
+                    detail=(
+                        f"Chrome cannot create runtime files under {self.profile_dir}; "
+                        "the directory is not writable by this process"
+                    ),
+                ) from exc
             if _is_target_closed(exc):
                 # A TargetClosedError at LAUNCH usually means the profile dir
                 # is held by another Chrome — most commonly a stale browser
@@ -1649,9 +1671,26 @@ class FlowApiClient:
             # deadline this one just replaced.
             record_session_expiry(self.profile_dir, session_expires_at(data))
         token = data.get("access_token")
+        if not token:
+            # #803/#795: labs answering 200 with no token — even after the one
+            # refresh above — is the migrated-account shape, not an expired session.
+            raise AisandboxAuthError(
+                detail="no access_token in /fx/api/auth/session",
+                status=status,
+                instance=_make_instance(),
+                route="auth/session",
+                remediation_hint=(
+                    "Flow's labs.google session carries no API token for this account. "
+                    "On accounts Google serves from flow.google.com this is expected "
+                    "and re-authenticating will not help — it can also roll this "
+                    "profile's Chrome-strategy marker back and start the #791 "
+                    "re-login loop. Generation still works; the routes that need this "
+                    "token do not. See issue #803."
+                ),
+            )
         if _session_unusable(data):
             raise AisandboxAuthError(
-                detail="no access_token in /fx/api/auth/session (session expired?)",
+                detail="access_token in /fx/api/auth/session has lapsed (session expired)",
                 status=status,
                 instance=_make_instance(),
                 route="auth/session",
@@ -1665,11 +1704,22 @@ class FlowApiClient:
         try:
             parsed = json.loads(await resp.text())
         except json.JSONDecodeError as exc:
+            # #803: a non-JSON body is an interstitial, a consent page or a
+            # redirect — not an expired credential. Re-authenticating cannot
+            # change the shape of this reply, so the class default would send
+            # the user somewhere that costs them their session for nothing.
             raise AisandboxAuthError(
                 detail="non-JSON /auth/session response",
                 status=resp.status,
                 instance=_make_instance(),
                 route="auth/session",
+                remediation_hint=(
+                    "Flow's session endpoint returned a non-JSON response — an "
+                    "interstitial or a redirect, not an expired cookie. Re-run with "
+                    "GFLOW_CLI_LOG_LEVEL=DEBUG and check which host Flow served this "
+                    "account from; re-authenticating will not change a non-JSON "
+                    "reply. See issue #803."
+                ),
             ) from exc
         return resp.status, cast("JsonObject", parsed) if isinstance(parsed, dict) else {}
 
@@ -1759,11 +1809,23 @@ class FlowApiClient:
             await self._ensure_access_token()
             resp = await self._run_with_retry(attempt, route=route)
             if resp.status == 401:
+                # #803: the token was minted and then refused, so the Google
+                # sign-in is the one thing here that demonstrably works. Name
+                # the route — it is what tells the user which capability is
+                # refused rather than implying the whole session is broken.
                 raise AisandboxAuthError(
                     detail="aisandbox-pa returned 401 after token refresh",
                     status=401,
                     instance=_make_instance(),
                     route=route,
+                    remediation_hint=(
+                        "Flow's labs.google session issued an API token and "
+                        f"aisandbox-pa rejected it on route {route}. Your Google "
+                        "sign-in is not the problem — minting that token is what "
+                        "proves it works. Most commonly Flow now serves this account "
+                        "from flow.google.com, where these read routes have not "
+                        "answered for us. See issue #803."
+                    ),
                 )
         return resp
 
@@ -2107,6 +2169,29 @@ class FlowApiClient:
         }
         data = await self._post_json(routes.UPLOAD_IMAGE, body)
         return AssetInfo.from_upload_response(data)
+
+    async def upload_reference(self, project_id: str, path: Path) -> ImageRef:
+        """Upload a local image into ``project_id`` once, as a reference to use in place.
+
+        Returns an ``ImageRef`` for an image now in the project (``in_project=True``),
+        so every later use is a mention, never another upload (#913). The transport
+        uploads it when it drives the host Flow served (flow.google.com: the composer
+        toolbar, which names the media id and a run-unique caption); otherwise the REST
+        upload. The file is checked first either way (size, image magic bytes).
+        """
+        from gflow_cli.api.image import ImageRef  # noqa: PLC0415 - typing-only at module level
+
+        await validate_image_file(path)
+        uploader = cast(
+            "Callable[..., Awaitable[ImageRef | None]] | None",
+            getattr(self.transport, "upload_reference", None),
+        )
+        if uploader is not None:
+            ref = await uploader(project_id=project_id, path=path)
+            if ref is not None:
+                return ref
+        asset = await self.upload_image(project_id, path)
+        return ImageRef(name=asset.name, display_name=asset.display_name, in_project=True)
 
     async def download(self, name_or_url: str, out_path: Path) -> Path:
         """Download an asset (image or video) to `out_path`. Returns out_path.
@@ -2736,11 +2821,10 @@ class FlowApiClient:
             # root grid, which is where the client-side handoff leaves the pooled
             # bootstrap page, has no script at all.
             #
-            # The migrated image path now bypasses this method through the
-            # ``uses_page_owned_image_recaptcha`` transport capability. Keep this
-            # host guard for the narrow race where a labs page hands off while a
-            # caller is already minting; the project page owns the token and the
-            # migrated composer submits ``ogiZ0b`` itself.
+            # Image generation no longer reaches this method on the UI transport
+            # (#891: it never read the token). The guard stays for the callers that
+            # genuinely send one -- the experimental HTTP image transports, upscale
+            # and extend -- where a labs page can hand off mid-mint.
             raise_if_migrated(page, at="mint_recaptcha_token")
             # Patchright evaluates in an isolated world by default, where the
             # page's main-world ``grecaptcha`` global is undefined; the resolver
@@ -2748,15 +2832,12 @@ class FlowApiClient:
             minter = TokenMinter(page, mint_evaluate_kwargs=mint_evaluate_kwargs())
             try:
                 return await minter.mint(action)
-            # Deliberately broad. `TokenMinter.mint` guards only its SECOND
-            # evaluate: `site_key()` -> `discover_site_key` runs an unguarded
-            # `page.evaluate`, and the minter is rebuilt per call so `_site_key`
-            # is always None and that unguarded call runs every time. A hop
-            # mid-mint destroys the execution context, so the likeliest shape of
-            # this failure is a RAW Playwright error, not RecaptchaError —
-            # catching only the latter would miss the very race this exists for.
-            # Nothing is swallowed: the original propagates untouched unless the
-            # page turns out to be migrated.
+            # Deliberately broad. Both of `TokenMinter`'s evaluates now raise
+            # `RecaptchaError` (#915; the site-key read was unguarded until then and
+            # surfaced a RAW Playwright error), but the minter is not the only code in
+            # this block, and the re-classification below must see any failure a hop
+            # mid-mint can cause. Nothing is swallowed: the original propagates
+            # untouched unless the page turns out to be migrated.
             except Exception:
                 # #692: the guard above is a point-in-time read, and the handoff
                 # to flow.google.com is a CLIENT-SIDE navigation that can land
@@ -2820,12 +2901,14 @@ class FlowApiClient:
         on_checkpoint: GenerationCheckpointObserver | None = None,
         name_resolver: Callable[[str], str | None] | None = None,
     ) -> list[GeneratedImage]:
-        """Mint a token, call the transport once, and return all images.
+        """Call the transport once and return all images, minting first only for a
+        transport that sends the token itself.
 
         ``req.count`` controls how many images Flow generates (1–4). The UI
         transport clicks the matching x{N} tab so one submission produces N
         images; other transports may fan-out internally, but that is their
-        concern. This method is the single place reCAPTCHA minting happens.
+        concern. The UI transport never reads ``recaptcha_token`` (#891), so it
+        gets no client mint; the HTTP image transports do.
 
         ``on_checkpoint`` (Task C1) receives a ``submit_attempted`` observation
         immediately before the credit-spending transport call, then a
@@ -2844,10 +2927,12 @@ class FlowApiClient:
             await self._require_likeness_eligibility(surface="image")
         page_owned = getattr(self.transport, "uses_page_owned_image_recaptcha", None)
         if callable(page_owned) and page_owned():
-            # The migrated Angular page mints and submits its own token on ogiZ0b.
-            # Minting here first is not only redundant: the pooled bootstrap page is
-            # flow.google.com/ (no enterprise.js), while /project/<id> is the page that
-            # owns the script. Let the transport navigate before Flow spends a token.
+            # #891: a transport that drives Flow's own page never reads
+            # `recaptcha_token` -- the page mints its own on click -- so a client
+            # mint here is dead weight at best. At worst it runs on whatever page the
+            # pool hands out, which after a successful migrated run is about:blank,
+            # and turns the transport's precise exit 36 into a misleading
+            # RecaptchaError. Unported forms are refused by the transport's router.
             req_with_token = req
         else:
             token = await self._mint_recaptcha_token(recaptcha_action)
@@ -3915,6 +4000,41 @@ def _extract_provider_error_message(body_text: str) -> str | None:
     return None
 
 
+#: Flow's own words when a labs tRPC route is retired. Measured 2026-09-20 on
+#: ``projectInitialData`` (profile denon82, healthy session, 57 context cookies):
+#: HTTP 404, body ``{"error":{"json":{"message":"Flow RPCs have been deprecated and
+#: disabled. Flow has migrated to https://flow.google.com.","code":-32004,...``
+#: Keyed on THAT MESSAGE — never on which host an account is served, and never on a
+#: route allowlist, so a route we have not observed yet is covered the day Flow
+#: retires it (#875, AGENTS.md "Host-Membership Discipline").
+_LABS_RPC_RETIRED_MARKER = "flow rpcs have been deprecated"
+
+
+def _labs_rpc_retired_hint(body_text: str, *, route: str) -> str | None:
+    """Remediation for a labs tRPC route Flow has retired, or ``None``.
+
+    ``WireFormatError``'s class default tells the user to check the payload, retry
+    with a simpler prompt and file a bug. On this response all three are wrong in
+    the same way #803 and #789 were wrong — gflow asserting something nothing
+    measured. The route is gone, ``gflow character list`` has no prompt to simplify,
+    and Flow documents the condition in the very body we are classifying.
+    """
+    if _LABS_RPC_RETIRED_MARKER not in body_text.lower():
+        return None
+    # Deliberately suggests no setting. GFLOW_CLI_FLOW_HOST=flow.google.com was
+    # MEASURED not to help (2026-09-20, denon82, `character list`): the same 404
+    # comes back, because this read has no migrated arm to route to. Naming it
+    # here would repeat the mistake this hint exists to fix — advice nothing
+    # measured, on the field a user checks to find out what to do next.
+    return (
+        f"Flow has retired this labs route ({route}) — the request payload is fine, "
+        f"there is no prompt to simplify, and there is no bug to file. Flow has moved "
+        f"to flow.google.com, and gflow has not ported this read to that frontend yet, "
+        f"so the command has no working path today. Track "
+        f"https://github.com/ffroliva/gflow-cli/issues/639 for the port."
+    )
+
+
 def _raise_for_non_retryable(resp: Any, body_text: str, *, route: str) -> None:
     """Classify a response that survived the retry loop.
 
@@ -3986,6 +4106,8 @@ def _raise_for_non_retryable(resp: Any, body_text: str, *, route: str) -> None:
             status=resp.status,
             instance=instance,
             route=route,
+            # None keeps the class default for every other 4xx (#875).
+            remediation_hint=_labs_rpc_retired_hint(body_text, route=route),
             discovery=_build_wire_format_discovery(resp, body_text, route),
         )
 

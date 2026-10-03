@@ -209,6 +209,345 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   script read "no Flow access" as "no Avatar". A script branching on 39 for the Avatar
   must now test 40.
 
+## [0.82.1] — 2026-10-02
+
+### Fixed
+
+- **A video's Flow workflow id is recorded in the catalog (#898).** It was written as
+  `NULL` for every clip. As a result, the MCP task result's `flow_workflow_id` was always
+  `null` for a video, and a clip could not be looked up by its workflow id. On
+  flow.google.com the id now comes from the generation record (slot 0, the id Flow polls
+  the clip by); on labs, from the generate reply's `media[0].workflowId`, which is not the
+  operation name already stored as `flow_operation_id`.
+- **Recording a started video twice no longer crashes (#898).** A second start for a
+  media id already in the catalog minted a fresh row id and hit
+  `UNIQUE(profile_name, flow_media_id)` (`DataIntegrityError`). A start for a media id the
+  catalog already holds is now a no-op, so it cannot reset a completed clip to `pending`.
+- **A busy catalog no longer turns a successful generation into a failed one (#900).**
+  When another gflow process held the local database's write lock past the 5 s
+  `busy_timeout`, recording a finished clip raised a raw `sqlite3.OperationalError`. That
+  missed every handler that downgrades a recording failure to a warning, so `gflow video`
+  exited 1 ("unexpected error") for a clip that existed and was paid for, and tried to
+  record it as failed. Catalog transactions now raise `DataStoreError`, so `gflow image`
+  and `gflow video` succeed and log a `data.persistence_failed_after_success` warning
+  naming the media id. Outside a successful generation the same failure exits 16
+  instead of 1.
+- **A reCAPTCHA mint failure is a typed error with Problem Details (#915).** It was a bare
+  `RuntimeError`: `gflow image upscale` and `gflow video extend` (and image generation on
+  the experimental HTTP transports) exited 1 with an "unexpected" message and no
+  remediation, an MCP/worker caller got a hashed "Unknown Error", and on an experimental
+  transport one failure ended a multi-prompt run past `--continue-on-error`. It now has its
+  own `type` (`…/errors/recaptcha-mint`) and a `retryable` flag set from a live measurement:
+  a mint that lost a race with a navigation, or ran on a Flow page before Flow injected its
+  reCAPTCHA script, is retryable (the settled page mints); a mint on a page that is not a
+  web page (`about:blank`) is not (it fails the same way every time); an empty token, never
+  observed, keeps the class default (not retryable). It still exits 1 —
+  branch on the `type`. The site-key message no longer blames "the Flow editor page" or "the
+  script tag layout", which was false on the `about:blank` page where it was seen (#891).
+
+## [0.82.0] — 2026-10-01
+
+### Added
+
+- **A `gflow run --config` row can reference a local image file (#913).** Set `"ref"` to a
+  path, resolved against the config file's folder. The file is checked before the browser
+  starts (it must exist and be a real image). It is uploaded once per run, on first use;
+  every row naming the same file references that upload in place, so the project holds
+  one copy. See [docs/USAGE.md](docs/USAGE.md#referencing-a-local-file).
+- **A `gflow run --config` row can generate from an earlier row's image (#913).** Set
+  `"ref": "batch:N"`. The earlier image is already in the run's Flow project, so it is
+  referenced in place by the handle Flow returned. Nothing is re-uploaded, and the
+  project holds no duplicate. Rows run in file order, deferred only until
+  their parent has run. A failed parent skips its dependents with the reason instead of
+  submitting them without the reference. A referenced row must make one image. On
+  flow.google.com the image is found in the composer's `@` picker and chosen by its
+  thumbnail identity, not its caption (captions repeat). The submit is aborted before
+  Flow acts if it does not carry the reference. `gflow image batch` refuses references and
+  points at `gflow run`. See [docs/USAGE.md](docs/USAGE.md#referencing-an-earlier-row).
+- **`gflow run --config` and multi-prompt `gflow image t2i` now record their successful
+  generations in the local catalog.** They recorded failures only. A referencing row is
+  recorded as image-to-image with its parent as the input.
+
+### Fixed
+
+- **Manifest references are refused instead of silently ignored (#913).** A
+  `gflow run --config` or `gflow image batch` row with `ref` or `reference_entity` was
+  accepted, then ran as plain text-to-image with exit 0. v0.52.0 announced the fields
+  (#317), but nothing ever applied them. Both commands now refuse such a row before any
+  browser work, naming the row and field: exit 11 for `run`, a usage error (exit 2) for
+  `image batch`. The exceptions are `"ref": "batch:N"` and a local image file in
+  `gflow run --config`, which now work (see Added).
+
+- **The docs no longer suggest clearing a sign-in screen in the generation window
+  (#925).** 0.81.0's docs said to make the off-screen generation browser visible and
+  clear an account chooser or consent screen in it. A generation run gives up about 30 s
+  after it clicks the chooser row, so that was a race. It also contradicted the error
+  itself, which says to run `gflow auth login --profile <name>`. The login window is
+  always visible and waits for you, so that is the remedy the docs now give.
+  `GFLOW_CLI_BROWSER_WINDOW_POSITION` remains for watching or debugging a run.
+
+## [0.81.0] — 2026-09-30
+
+### Added
+
+- **The generation browser opens off-screen (#923).** Headed Chrome is required, so until
+  now every `image`/`video` run put a Chrome window over your desktop. It now opens at
+  `-30000,-30000`. It is still fully headed, so Flow and reCAPTCHA see the same browser.
+  Image and video generation were measured unchanged, and the page is not throttled.
+  `GFLOW_CLI_BROWSER_WINDOW_POSITION` takes any `X,Y` to place it where you want (to watch
+  a run or clear a consent screen by hand); empty restores Chrome's own placement. It
+  does not stop Chrome taking keyboard focus at launch. Login windows are unaffected. See
+  [docs/CONFIGURATION.md](docs/CONFIGURATION.md#gflow_cli_browser_window_position).
+  Thanks to @johngbl for the idea and the first implementation.
+
+### Security
+
+- **Locked `urllib3` 2.8.0 (CVE-2026-97687, CVE-2026-97688, CVE-2026-97689).**
+  Transitive only — via `requests` and, with the `s3` extra, `botocore`. No gflow
+  code imports it directly.
+
+### Fixed
+
+- **Windows profile write-denial is distinguished from browser contention.** When
+  the generation client's browser launch fails with a Chrome `ProcessSingleton`
+  error carrying Windows access-denied code 5, it now raises `ProfileAccessError`
+  (configuration exit code 11) instead of a misleading "another Chrome holds it"
+  `ProfileLockedError` or an unclassified error. The match is on the error code,
+  so it works in every Windows display language. The remediation points to
+  profile-directory write access, not to closing a competing Chrome. Not covered
+  yet: `gflow auth login` / auth verification, and the standalone and experimental
+  transport launches — those still surface Chrome's raw error.
+  Thanks @L1meSn0w for the diagnosis and the Windows reproduction (#919).
+
+## [0.80.0] — 2026-09-29
+
+### Security
+
+- **Locked `oauthlib` 4.0.0 (CVE-2026-49265) and `pyjwt` 2.15.1 (CVE-2026-102274).**
+  Both are transitive: `oauthlib` via the `gcs` extra (`gcsfs` → `google-auth-oauthlib`
+  → `requests-oauthlib`), `pyjwt` via `mcp[crypto]`. No gflow code imports either directly.
+
+### Added
+
+- **Explicit video resolution control (`--resolution [360p|720p]`, #787).** Added `--resolution`
+  to `gflow video t2v`, `i2v`, and `r2v`, as well as MCP tool `gflow_generate_video`.
+  Enables explicit selection of `360p` or `720p` on models providing resolution controls
+  (such as `omni-flash`), preventing unintended defaults.
+- **Support for Nano Banana 2 Lite (`--model nano2-lite`, #787).** Added `nano2-lite` alias mapped
+  to Google's internal `HARBOR_SEAL` wire model for `gflow image t2i`, `i2i`, and `batch`. Its I2I reference
+  cap starts at 3 because it has not been measured yet, and its daily quota is
+  unmeasured too ([spike](docs/superpowers/spikes/2026-09-11-nano2-lite-capability.md)).
+
+### Fixed
+
+- **An unported image form is refused by name, on a fresh or a reused client (#891).**
+  The browser transport no longer pre-mints a reCAPTCHA token for images: Flow's page
+  mints its own, and the client's token was never read. After a successful image the
+  pre-mint ran on the parked `about:blank` page and turned exit 36 into a misleading
+  `RecaptchaError`. The refusal now comes from the composer and names the form, e.g.
+  "the IMAGEN_3_5 model is not ported yet". Reachable from `gflow run --config` with a
+  per-prompt `imagen4` after a successful prompt: that run used to crash with exit 1 and
+  lose its results table; now the prompt fails by name and the run completes. This
+  corrects the 0.78.0 note that project-less image runs "keep the served host": the
+  client creates the project first, so they are served by the migrated composer. The HTTP
+  image transports still mint.
+- **A clip whose download connection dropped is no longer recorded as never generated
+  (#896, #898).** When Flow reports a video done but the signed-media connection drops
+  on every retry, the catalog now marks the asset `MEDIA_GENERATION_STATUS_SUCCESSFUL`
+  rather than leaving it `pending` forever. The operation's `error_type` is
+  `media-download` (still exit 6), so `gflow data list errors` tells a lost transfer from
+  a failed generation. `gflow data list videos` gains a `STATUS` column and a `status`
+  field in `--json`. An HTTP error answer on the signed URL still leaves the asset
+  `pending`. **Changed:** that failure's Problem Details `type` is now
+  `…/errors/media-download` (a subclass of the `network` error, same exit code).
+- **A generation flow.google.com refuses is now reported as that refusal, by name (#906, #873).**
+  Flow answers a refused submit with HTTP 200 and a `batchexecute` error envelope carrying
+  Google's reason (`PUBLIC_ERROR_UNUSUAL_ACTIVITY`), but gflow's parser discarded any frame
+  without a payload. So a refusal ended as a retryable 60 s video timeout (exit 9) or an image
+  "no ogiZ0b frame" wire fault (exit 7), whose remediation tells you to file a frontend bug.
+  It is now `WafRejectionError` (exit 10) — the class the labs path has always used for the same
+  reason — with a remediation that says the prompt is not the cause and nothing was charged. The
+  content-safety reasons map to `ContentPolicyError` (exit 5) as on the REST path. Read from the
+  wire, not from the grid's failure card, which looks identical for a refusal and an aborted
+  submit ([spike](docs/superpowers/spikes/2026-09-27-migrated-refusal-is-on-the-wire.md)).
+  The refusal was observed live on the image submit; the video submit reads the same framing
+  and is covered offline, but a live video refusal has not been captured yet.
+  Diagnosed by [@stgmt](https://github.com/stgmt) in #873 and #906; this change supersedes
+  #873 and the refusal-card half of #907.
+
+- **`gflow auth login` no longer reports success while Google is waiting for the account to
+  "Confirm it's you" (#902).** In that state the cookies stay valid, so the session probe
+  answered in 0.4 s and the login closed Chrome before Flow's client-side hop to
+  `flow.google.com/about` could land. It then printed `[OK] Flow session verified` on an
+  account where every command still exited 31. The login now watches a `flow.google.com`
+  landing for up to 3 s before it closes. If Flow routes the page to `/about`, Chrome stays open
+  and the user is told to press the page's main button and finish Google's check. Closing the
+  window or running out of time in that state exits 12 with the new
+  `IdentityRecheckPendingError`. The #849 on-disk check is skipped in that case, because it reads
+  the same healthy cookies. A labs-served login closes as fast as before. The failing state is
+  tested offline only: the one account measured in it (2026-09-23) had already been cleared by
+  hand, and none of the profiles here is in that state now.
+
+## [0.79.1] — 2026-09-22
+
+### Fixed
+
+- **A finished, billed clip is no longer thrown away when its download hits a connection
+  reset (#895).** The signed-media GET was issued once, with no retry: a single
+  `ECONNRESET` mid-transfer failed the whole command *after* Veo had produced the clip and
+  charged for it — reported at 2 failures in 6 consecutive runs. The transfer now survives
+  a dropped connection using Playwright's own `max_retries`, which retries on the driver's
+  `ECONNRESET` and never on an HTTP status, and whose backoff is charged to the same
+  timeout rather than multiplying it: three attempts stay inside one ~180 s budget instead
+  of stretching to nine minutes on a lock shared with every other generation. Measured
+  with an A/B control, not read from the docs —
+  [spike](docs/superpowers/spikes/2026-09-22-playwright-max-retries-econnreset.md).
+  Fixed at **all three** download sites, not just the one the traceback named: the
+  migrated composer, `gflow data download`'s own recovery GET (so the escape hatch cannot
+  be stranded by the fault it exists to rescue), and the labs `media.getMediaUrlRedirect`
+  path.
+- **A lost transfer now says the clip survived, instead of `Unexpected error` (#895).**
+  `playwright.async_api.Error` is not a gflow error class, so it escaped the typed-error
+  contract entirely and rendered as *"Unexpected error … exit code 1, retryable: False"* —
+  of which the last two are wrong and the first is useless. It is now `NetworkError`
+  (exit 6, correctly retryable) carrying the media id and `gflow data download <id>`, so a
+  user is not left re-generating a clip they already own. The exception message is
+  deliberately **not** forwarded into `detail`: Playwright concatenates its server-side
+  call log into it, and `detail` reaches stderr and `--json` stdout without passing
+  through redaction, so a signed URL would leak. Both MCP twins gain this for free — until
+  now `gflow_download_media` returned *"Unexpected Error; details were logged
+  server-side"* with no remediation field at all, and the queued `gflow_generate_video`
+  path returned `detail: "sha256:<hash>"` with neither `remediation_hint` nor `retryable`.
+- **A failed generation now keeps its media id on the queue row, so an MCP agent can
+  actually recover the clip (#895).** The remediation added above names the media id and
+  tells the user to recover it — but over MCP that advice was unusable. The worker's
+  success branch recorded `flow_media_id` on the queue row; the failure branch did not,
+  so the row stayed `NULL` and `gflow_generate_video`'s failed envelope carried no id at
+  all. The agent's only copy was a UUID buried in an English sentence, suggesting a
+  *shell command* an MCP client cannot run, when its actual tool takes `media_id=`.
+  `update_task_status` already COALESCEs, so a task that failed before Flow named
+  anything still records nothing.
+
+- **An expired signed link stops blaming your prompt (#895).** A late GET answers 4xx, and
+  every one of those branches fell through to `WireFormatError`'s class default — *"retry
+  with a simpler prompt text"* — on paths that carry no prompt and no payload. The same
+  wrong-advice class removed in #875. Each now names the short link lifetime and the
+  credit-free re-mint.
+- **The labs video download verifies where its redirect landed (#895).** That route is a
+  302 by design, so it follows up to 5 hops, and nothing checked the final host — the
+  posture the migrated arm gets from refusing redirects outright. The bytes are now
+  refused unless the landing host is an allowed Google host.
+- **A retired labs route no longer tells you to simplify a prompt you never wrote.**
+  Every labs tRPC route except project-create now answers HTTP 404 with Flow's own
+  explanation — *"Flow RPCs have been deprecated and disabled. Flow has migrated to
+  https://flow.google.com."* — and gflow surfaced it as a bare `WireFormatError` (exit 7)
+  carrying the class-default advice: check the payload, retry with a simpler prompt, file
+  a bug. All three were wrong. The payload is fine, `gflow character list` is a read with
+  no prompt at all, and Flow documents the condition in the very body being classified.
+  The refusal is now recognised **by that message** — never by which host an account is
+  served, and never by a route allowlist, so a route we have not observed yet is covered
+  the day Flow retires it — and carries a remediation that names the retired route and
+  points at [#639](https://github.com/ffroliva/gflow-cli/issues/639). It deliberately
+  suggests **no** setting: `GFLOW_CLI_FLOW_HOST=flow.google.com` was measured not to help
+  (2026-09-20, `character list`), because the read has no migrated arm to route to, and
+  naming it would repeat the mistake being fixed. The error class and exit code are
+  unchanged ([#875](https://github.com/ffroliva/gflow-cli/issues/875)).
+
+- **`KNOWN_ISSUES.md` no longer claims `gflow character list` works on the migrated host.**
+  Measured twice on 2026-09-20 — with and without `GFLOW_CLI_FLOW_HOST=flow.google.com` —
+  it exits 7 on the retired labs `projectInitialData` route both times. `list_characters`
+  reads that route unconditionally and has no migrated path
+  ([#875](https://github.com/ffroliva/gflow-cli/issues/875)).
+
+### Changed
+
+- **The nightly canary stops crying wolf about an account that cannot reach Flow.**
+  An e2e failure caused by Flow serving its public `/about` landing is now reported as a
+  SKIP carrying the measurement, because it is a missing precondition rather than a
+  product failure — measured 2026-09-20, `gflow project create` succeeded on two profiles
+  and failed only on the canary's in the same minute. Seven of the thirteen standing
+  failures in [#559](https://github.com/ffroliva/gflow-cli/issues/559) were this one
+  condition, unchanged across three nightly runs, and the noise hid a real finding:
+  `test_project_create_e2e.py` shipped in v0.78.0 and had never passed once.
+  Test-only ([#888](https://github.com/ffroliva/gflow-cli/issues/888)).
+
+  It narrows deliberately. The guard matches a marker **gflow itself** emits from
+  `raise_if_known_landing`, never anything Flow says; a tripwire outside `tests/e2e/`
+  asserts that marker against the real raise site so a reword cannot silently disable it;
+  and it covers the `public` landing kind **only**. Two transports tests that fail on the
+  `signin` kind are left red on purpose — catching `AuthExpiredError` would silence the
+  signal an e2e exists to raise.
+
+### Added
+
+- **E2E coverage for the retired-route diagnosis** (`tests/e2e/test_retired_labs_route_diagnosis_e2e.py`,
+  `e2e_auth`, 0 credits, one read-only GET). The unit tests for
+  [#875](https://github.com/ffroliva/gflow-cli/issues/875) feed the classifier a *captured*
+  body, so they stay green if Flow changes the wording, un-retires the route or switches to
+  401 — while the user-facing diagnosis silently goes wrong again. This one asks Flow. It
+  needs no project fixture (the route is retired before any project lookup) and **skips
+  rather than passes** on an account still served the labs tRPC API, so a cohort change
+  cannot retire it unnoticed. Verified by falsification: with detection disabled it fails
+  with the pre-fix message verbatim.
+
+## [0.79.0] — 2026-09-18
+
+### Added
+
+- **`gflow data download <media_id>` — recover a billed asset whose download failed.**
+  A generation that finishes but whose signed media URL is never observed exits 7 with
+  the credit already spent: the clip sits in the Flow project, the catalog row says
+  `local_path: null`, and no command could fetch it. The only recovery the CLI offered
+  was to generate it again and pay twice — and because the failure is a timing window,
+  the retry could strand another copy. The new command opens the clip's own route, takes
+  the signed URL Flow reports for it, verifies the bytes against the size Flow records,
+  writes the file and updates `local_files`. Costs no credits. Mirrored as the
+  `gflow_download_media` MCP tool.
+  **Video only**, and it says so: the signed URL comes from the `as29s` record Flow emits
+  when a clip's own route loads, which an image's route does not carry. An image media id
+  is refused immediately with exit 11 rather than opening a browser
+  ([#877](https://github.com/ffroliva/gflow-cli/issues/877)).
+
+### Fixed
+
+- **Auth errors on aisandbox routes no longer blame a cookie they never read
+  (#803).** `AisandboxAuthError`'s default remediation said *"SAPISID cookie
+  missing, expired, or unreadable — re-run `gflow auth login`"*. v0.74.0 corrected
+  the two `gflow credits` sites, but the other three raise sites inherited that
+  default, so every route through `_run_with_aisandbox_retry` — `createScene`,
+  `commitWorkflow`, `createEntity`, `projectInitialData`, `upsampleImage` and the
+  rest — still said it. None of them reads SAPISID: the credential is a Bearer
+  token minted by labs' session endpoint, and SAPISID's only role is getting that
+  endpoint to answer at all. The advice was therefore wrong in every word, and
+  costly: on a profile with no browser-strategy marker a failed re-login rolls the
+  marker back and starts the #791 loop. Each site now states what was actually
+  rejected — a non-JSON reply is named as an interstitial, a token-less session is
+  named as the flow.google.com shape, and a 401 after refresh names the route that
+  refused it.
+- **The migrated host no longer reports a model it never observed (#789).**
+  `model_name_type` echoed the requested `--model` back on `flow.google.com`, where
+  the `ogiZ0b` reply carries no model field at all. `recorder.py` persists that
+  value as `AssetRecord.model`, so the echo was read back by `gflow data` as though
+  Flow had confirmed it — and with a hidden model picker (#788) the model actually
+  selected can differ from the one requested, making the echo wrong on the single
+  field a user would check to find out. It is now `null` on that host, and typed
+  `str | None`. On `labs.google` it is unchanged: Flow's own value, from Flow's own
+  reply.
+  ([#865](https://github.com/ffroliva/gflow-cli/issues/865),
+  [#871](https://github.com/ffroliva/gflow-cli/issues/871))
+
+- **`gflow data download` refuses an image immediately instead of blaming the project,
+  the trash and your prompt (#877).** Recovery is video-only: the signed URL comes from
+  the `as29s` record Flow emits when a clip's own route loads, and an image's route does
+  not carry one. The command accepted an image media id anyway, launched Chrome, waited
+  45 s, and then produced three guesses — wrong project, clip in trash, *"retry with a
+  simpler prompt text"* — for a condition the catalog row states outright, on a command
+  that has no prompt. It now checks `kind` before anything else and exits 11 saying
+  recovery is video-only. The CLI help, the `gflow_download_media` MCP description and
+  `docs/USAGE.md` all said "asset"; they now say video. The timeout message that remains
+  for a genuine video miss drops the inherited generation-payload remediation and
+  describes what to actually check.
+
 ## [0.78.0] — 2026-09-17
 
 ### Added
@@ -265,6 +604,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/superpowers/spikes/2026-09-17-migrated-end-frame-submit-contract.md`). Frames given
   by media UUID or `@Name` are still not ported.
   ([#639](https://github.com/ffroliva/gflow-cli/issues/639))
+- Migrated image submits prove the composer before any network observer arms:
+  cookie-bar dismissal, blocking-overlay refusal, and submit pointer hit-test,
+  each raising typed `UiSelectorDriftError` with bounded redacted diagnostics
+  instead of bare Playwright timeouts.
 
 ### Fixed
 
@@ -328,6 +671,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GFLOW_CLI_LEASE_WAIT_SECONDS` you set yourself, in the environment or a `.env`, still
   wins. The CLI keeps failing fast. Thanks to @iceblue03 (#862).
   ([#864](https://github.com/ffroliva/gflow-cli/issues/864))
+- Image requests that the migrated composer serves, with a named project,
+  from a pre-navigation page prefer the migrated host on `auto`, so the
+  page-owned recaptcha path wins the post-goto handoff race instead of a
+  doomed pre-navigation mint (#692). Labs editors, unported forms, and
+  project-less runs keep the served host (and their pre-minted token); the
+  `labs.google` kill-switch behavior is unchanged.
 
 ## [0.77.1] — 2026-09-17
 
@@ -3029,6 +3378,8 @@ completed exit 0, proving no regression. See
 ### Added
 
 - **Intra-batch reference support for image batches (#317).** `BatchPromptItem` and `gflow image batch` now support `ref` and `reference_entity` fields (e.g. `ref="batch:0"`), with topological dependency sorting and circular dependency validation.
+  **Correction (#913):** this never worked. The fields were parsed and silently ignored,
+  and the sorting was never called; see the `[Unreleased]` Fixed entry for #913.
 - **Character entity provenance recording and video CLI flag parity (#402).** Added `--reference-entity` and `--reference-entity-name` CLI options to `gflow video` commands (`t2v`, `i2v`, `r2v`) and verified character provenance recording in `operations.metadata_json`.
 
 ### Fixed
@@ -5753,7 +6104,13 @@ shell-script template that branches on these codes.
 
 First skeleton. Not functional end-to-end yet.
 
-[Unreleased]: https://github.com/ffroliva/gflow-cli/compare/v0.78.0...HEAD
+[Unreleased]: https://github.com/ffroliva/gflow-cli/compare/v0.82.1...HEAD
+[0.82.1]: https://github.com/ffroliva/gflow-cli/compare/v0.82.0...v0.82.1
+[0.82.0]: https://github.com/ffroliva/gflow-cli/compare/v0.81.0...v0.82.0
+[0.81.0]: https://github.com/ffroliva/gflow-cli/compare/v0.80.0...v0.81.0
+[0.80.0]: https://github.com/ffroliva/gflow-cli/compare/v0.79.1...v0.80.0
+[0.79.1]: https://github.com/ffroliva/gflow-cli/compare/v0.79.0...v0.79.1
+[0.79.0]: https://github.com/ffroliva/gflow-cli/compare/v0.78.0...v0.79.0
 [0.78.0]: https://github.com/ffroliva/gflow-cli/compare/v0.77.1...v0.78.0
 [0.77.1]: https://github.com/ffroliva/gflow-cli/compare/v0.77.0...v0.77.1
 [0.77.0]: https://github.com/ffroliva/gflow-cli/compare/v0.76.0...v0.77.0

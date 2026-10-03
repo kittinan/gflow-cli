@@ -308,11 +308,14 @@ class GenerateVideoRequest:
     # ``Mode.AVATAR + use_avatar=False`` state. Valid on ``Mode.R2V`` (references
     # + likeness); REJECTED on ``Mode.T2V`` and ``Mode.I2V``.
     use_avatar: bool = False
+    # Requested video resolution ("360p" or "720p", omni-flash only); None -> Flow default
+    resolution: str | None = None
 
     def __post_init__(self) -> None:
         self._normalise_avatar()
         self._validate_prompt()
         self._validate_duration()
+        self._validate_resolution()
         self._validate_count()
         self._validate_frame_ref_ids()
         self._validate_mode_symmetry()
@@ -400,6 +403,11 @@ class GenerateVideoRequest:
                 f"workflow the avatar attach requires; choose a model that does "
                 f"(e.g. omni_flash, veo_3_1_lite, veo_3_1_fast)"
             )
+            raise ValueError(msg)
+
+    def _validate_resolution(self) -> None:
+        if self.resolution is not None and self.resolution not in ("360p", "720p"):
+            msg = f"resolution must be '360p' or '720p', got {self.resolution!r}"
             raise ValueError(msg)
 
     def _has_frame_input(self) -> bool:
@@ -611,6 +619,10 @@ class VideoStarted:
     media_id: str
     project_id: str | None = None
     flow_operation_id: str | None = None
+    #: Flow's workflow id for the clip (#898). On flow.google.com it is the generation
+    #: record's slot 0; on labs it is the generate reply's ``media[0].workflowId`` --
+    #: not ``operations[0].operation.name`` (``flow_operation_id``), a different id.
+    workflow_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -628,6 +640,7 @@ class VideoResult:
     local_path: Path | None
     project_id: str | None = None
     flow_operation_id: str | None = None
+    workflow_id: str | None = None  # see VideoStarted.workflow_id (#898)
 
 
 # Callback type: invoked by the transport the moment a media_id becomes known,
@@ -653,6 +666,20 @@ def operation_name_from_generate_response(response_json: dict[str, Any]) -> str 
         return None
     name_val: str | None = cast("str | None", operation.get("name"))
     return name_val if name_val is not None else None
+
+
+def workflow_id_from_generate_response(response_json: dict[str, Any]) -> str | None:
+    """Return ``media[0].workflowId`` from a batchAsyncGenerateVideo* response (#898).
+
+    Present in every committed capture (02 T2V, 08 I2V, 09 R2V), alongside a
+    ``workflows[0]`` entry whose ``metadata.primaryMediaId`` is the media name. ``None``
+    when absent: the id is catalog metadata, never a reason to fail a generation.
+    """
+    media = response_json.get("media")
+    if not isinstance(media, list) or not media or not isinstance(media[0], dict):
+        return None
+    value = cast(_StrAnyDict, media[0]).get("workflowId")
+    return value if isinstance(value, str) and value else None
 
 
 def media_name_from_generate_response(response_json: dict[str, Any]) -> str:

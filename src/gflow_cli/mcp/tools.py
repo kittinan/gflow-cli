@@ -54,6 +54,7 @@ from gflow_cli.profile_store import (
 )
 from gflow_cli.services.credits import inspect_all_profiles as inspect_all_credit_profiles
 from gflow_cli.services.credits import inspect_profile as inspect_credit_profile
+from gflow_cli.services.media_recovery import download_media
 from gflow_cli.worker import codec
 from gflow_cli.worker.daemon import FlowWorker
 from gflow_cli.worker.queue import QueueRepository
@@ -756,7 +757,8 @@ def _build_video_media_inputs(
     description=(
         "Generate an image using Google Flow's Imagen model. "
         "Produces 1-4 images from a text prompt. "
-        "Models: nano2 (fast), nano-pro (balanced), image4 (highest quality). "
+        "Models: nano2 (fast), nano2-lite (lightweight), nano-pro (balanced), "
+        "image4 (highest quality). "
         "Aspects: 1:1, 9:16, 16:9, 4:3, 3:4. "
         "The prompt supports @AssetName mentions to tag saved project characters/assets by name "
         "(resolves to referenceEntities/referenceImages). Reference a SAVED named asset via "
@@ -795,7 +797,7 @@ async def gflow_generate_image(
             referenceEntities / referenceImages, deduped against reference_images). Use
             ``@Name`` for a saved named asset; use ``reference_images`` for an arbitrary
             one-off image. See ``docs/REFERENCE_STRATEGIES.md``.
-        model: Model to use — 'nano2', 'nano-pro', or 'image4'.
+        model: Model to use — 'nano2', 'nano2-lite', 'nano-pro', or 'image4'.
         aspect: Aspect ratio — '1:1', '9:16', '16:9', '4:3', '3:4'.
         count: Number of images to generate (1-4).
         seed: Optional random seed for reproducibility.
@@ -947,6 +949,7 @@ def _build_video_payload(
     count: int,
     model: str | None,
     duration: int | None,
+    resolution: str | None,
     tool_specs: Any,
     project: str | None,
     project_name: str | None,
@@ -967,6 +970,8 @@ def _build_video_payload(
         payload["model"] = model
     if duration is not None:
         payload["duration"] = duration
+    if resolution is not None:
+        payload["resolution"] = resolution
     if tool_specs:
         payload["tool_specs"] = list(tool_specs)
     if project is not None:
@@ -1012,6 +1017,7 @@ async def gflow_generate_video(  # NOSONAR
     reference_entity_names: list[str] | None = None,
     model: str | None = None,
     duration: int | None = None,
+    resolution: str | None = None,
     count: int = 1,
     tools: list[dict[str, Any]] | None = None,
     profile: str = _DEFAULT_PROFILE,
@@ -1064,6 +1070,10 @@ async def gflow_generate_video(  # NOSONAR
             omitted — Flow offers reference-to-video at its base tier alone, and at
             4 or 6 it drops the references and bills a text-to-video clip instead of
             refusing; any other value returns the exit-11-equivalent envelope.
+        resolution: Optional video resolution — '360p' or '720p' (omni-flash only,
+            mirrors the CLI ``--resolution``). When omitted, Flow's default applies. On any
+            other model, or on the labs editor, the job fails pre-submit with the
+            exit-11-equivalent envelope and no credits spent.
         count: Number of videos to generate (mirrors the CLI ``--count``; default 1).
         tools: Optional list of prompt tools to apply before generation.
             Each item is ``{"name": str, "options": dict}``.  Valid names
@@ -1200,6 +1210,7 @@ async def gflow_generate_video(  # NOSONAR
         count=count,
         model=model,
         duration=duration,
+        resolution=resolution,
         tool_specs=tool_specs,
         project=project,
         project_name=project_name,
@@ -1228,6 +1239,7 @@ async def gflow_generate_video(  # NOSONAR
         "reference_images": reference_images or [],
         "model": model,
         "duration": duration,
+        "resolution": resolution,
         "count": count,
         "tools": tools or [],
         "tool_specs": list(tool_specs),
@@ -1430,6 +1442,58 @@ async def gflow_character_show(
         char = await client.get_character(project, entity_id=entity_id, name=name)
 
     return {"status": "ok", "project": project, "character": _character_to_dict(char)}
+
+
+@server.tool(
+    name="gflow_download_media",
+    description=(
+        "Fetch an already-generated VIDEO from Flow by its media ID and write it to "
+        "disk. For a generation that finished and was billed but whose download failed "
+        "— the clip is in the Flow project and the local catalog shows no file for it. "
+        "Spends no credits: the generation was already paid for. The bytes are verified "
+        "against the size Flow reports before the file is written. Video only: an image "
+        "media ID is refused immediately (exit 11) because the signed URL this needs "
+        "comes from a record only a clip's route emits. See issue #877. "
+        "The transfer already retries a dropped connection internally, so a failure "
+        "marked retryable means wait a moment and call again — never immediately, and "
+        "never in a tight loop: each call opens a browser under a per-profile lease, and "
+        "a second concurrent call fails on that lease instead (exit 11)."
+    ),
+)
+@_guarded
+async def gflow_download_media(
+    media_id: str,
+    out_dir: str | None = None,
+    profile: str | None = None,
+) -> dict[str, Any]:
+    """Recover an already-generated asset by media id.
+
+    Args:
+        media_id: The Flow media ID, as shown by ``gflow_list_projects`` assets or the
+            catalog. This is the id a failed-download generation left behind.
+        out_dir: Directory to write into. Defaults to the configured output dir.
+        profile: Restrict the catalog lookup to one profile. Omit to search all —
+            an id present under several profiles is reported as an error naming them.
+
+    Returns:
+        Dict with the written ``path``, ``bytes``, ``media_id``, ``workflow_id``,
+        ``project_id`` and ``profile``.
+    """
+    log.info("mcp.tool.download_media", media_id=media_id, profile=profile)
+    result = await download_media(
+        media_id=media_id,
+        profile=profile,
+        out_dir=Path(out_dir) if out_dir else None,
+    )
+    return {
+        "status": "ok",
+        "media_id": result.media_id,
+        "workflow_id": result.workflow_id,
+        "profile": result.profile_name,
+        "project_id": result.project_id,
+        "path": str(result.path),
+        "bytes": result.bytes,
+    }
 
 
 @server.tool(
@@ -1997,6 +2061,7 @@ __all__ = [
     "gflow_generate_video",
     "gflow_list_tools",
     "gflow_list_projects",
+    "gflow_download_media",
     "gflow_auth_status",
     "gflow_instructions_list",
     "gflow_instructions_add",

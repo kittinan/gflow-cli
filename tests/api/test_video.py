@@ -125,6 +125,16 @@ class TestGenerateVideoRequest:
         with pytest.raises(ValueError, match="prompt must not be empty"):
             GenerateVideoRequest(prompt="   ")
 
+    def test_resolution_accepts_360p_and_720p(self) -> None:
+        req360 = GenerateVideoRequest(prompt="x", resolution="360p")
+        assert req360.resolution == "360p"
+        req720 = GenerateVideoRequest(prompt="x", resolution="720p")
+        assert req720.resolution == "720p"
+
+    def test_resolution_rejects_invalid(self) -> None:
+        with pytest.raises(ValueError, match="resolution must be '360p' or '720p'"):
+            GenerateVideoRequest(prompt="x", resolution="1080p")
+
     def test_t2v_must_not_carry_image_inputs(self) -> None:
         with pytest.raises(ValueError, match="T2V request must not carry image inputs"):
             GenerateVideoRequest(prompt="x", mode=Mode.T2V, start_image=Path("a.png"))
@@ -445,3 +455,37 @@ class TestVideoResult:
         result = VideoResult(status=status, local_path=None)
         with pytest.raises(FrozenInstanceError):
             result.local_path = Path("/tmp/other.mp4")  # type: ignore[misc]
+
+
+class TestWorkflowIdFromGenerateResponse:
+    """#898: the labs generate reply names the clip's workflow (captures 02/08/09)."""
+
+    @pytest.mark.parametrize(
+        "capture",
+        [
+            "02_batchAsyncGenerateVideoText",
+            "08_batchAsyncGenerateVideoStartAndEndImage",
+            "09_batchAsyncGenerateVideoReferenceImages",
+        ],
+    )
+    def test_reads_media_workflow_id_from_each_capture(self, capture: str) -> None:
+        import json
+        from pathlib import Path
+
+        from gflow_cli.api.video import workflow_id_from_generate_response
+
+        root = Path(__file__).resolve().parents[2]
+        body = json.loads((root / "samples" / "captured" / f"{capture}.json").read_text("utf-8"))[
+            "response_body_parsed"
+        ]
+        workflow_id = workflow_id_from_generate_response(body)
+        assert workflow_id is not None
+        assert workflow_id == body["media"][0]["workflowId"]
+        # The reply's workflow entry names the same id (08/09 redact both as <WORKFLOW_ID>).
+        assert workflow_id == body["workflows"][0]["name"]
+
+    def test_absent_is_none_not_an_error(self) -> None:
+        from gflow_cli.api.video import workflow_id_from_generate_response
+
+        assert workflow_id_from_generate_response({"media": [{"name": "m"}]}) is None
+        assert workflow_id_from_generate_response({}) is None

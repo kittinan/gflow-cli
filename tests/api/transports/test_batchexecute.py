@@ -188,3 +188,44 @@ def test_record_matches_by_shape_not_position() -> None:
 
     rec = generation_record("YhhmEf", [[[[_record(2)]]]])
     assert rec.workflow_id == WF and rec.is_running
+
+
+# --- error envelopes: a refusal is a frame with a null payload -----------------------
+#
+# Captured 2026-09-27 on ``ogiZ0b`` with a tampered reCAPTCHA token (spike
+# 2026-09-27-migrated-refusal-is-on-the-wire). HTTP 200; the reason rides in slot 5.
+REFUSAL = (
+    ")]}'\n\n192\n"
+    '[["wrb.fr","ogiZ0b",null,null,null,[7,null,[["type.googleapis.com/google.rpc.ErrorInfo",'
+    '["PUBLIC_ERROR_UNUSUAL_ACTIVITY"]]]],"generic"],["di",240],'
+    '["af.httprm",239,"-4624648772470899085",5]]\n25\n[["e",4,null,null,228]]\n'
+)
+
+
+def test_rpc_errors_reads_the_status_and_reason_of_a_refusal() -> None:
+    from gflow_cli.api.transports.batchexecute import RpcError, rpc_errors
+
+    assert rpc_errors(REFUSAL) == [RpcError("ogiZ0b", 7, ("PUBLIC_ERROR_UNUSUAL_ACTIVITY",))]
+
+
+def test_a_refusal_yields_no_payload_frame() -> None:
+    from gflow_cli.api.transports.batchexecute import parse_frames
+
+    assert parse_frames(REFUSAL) == []
+
+
+def test_rpc_errors_on_a_bare_status_has_no_reason() -> None:
+    """The #723 shape: Flow queued the job, the reply still says [5]."""
+    from gflow_cli.api.transports.batchexecute import RpcError, rpc_errors
+
+    body = ')]}\'\n[["wrb.fr","MZZa6b",null,null,null,[5],"generic"]]\n'
+    assert rpc_errors(body) == [RpcError("MZZa6b", 5, ())]
+
+
+def test_rpc_errors_ignores_payload_frames_and_non_envelopes() -> None:
+    from gflow_cli.api.transports.batchexecute import rpc_errors
+
+    ok = ')]}\'\n[["wrb.fr","YhhmEf","[1]",null,null,null,"generic"]]\n'
+    assert rpc_errors(ok) == []
+    assert rpc_errors("<html>login</html>") == []
+    assert rpc_errors("") == []

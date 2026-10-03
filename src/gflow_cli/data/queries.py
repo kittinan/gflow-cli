@@ -285,6 +285,7 @@ class VideoRow:
     created_at: datetime
     local_path: str | None
     copy_count: int = 1
+    status: str | None = None
 
 
 # Aggregated: one row per asset, local_files collapsed into a subquery.
@@ -297,6 +298,7 @@ _LIST_VIDEOS_SQL = """
         a.aspect_ratio    AS aspect,
         a.model           AS model,
         a.duration_seconds AS duration,
+        a.status          AS status,
         a.created_at      AS created_at,
         COALESCE(lfa.copy_count, 0) AS copy_count,
         lfa.latest_path   AS local_path
@@ -329,6 +331,7 @@ _LIST_VIDEOS_ALL_COPIES_SQL = """
         a.aspect_ratio    AS aspect,
         a.model           AS model,
         a.duration_seconds AS duration,
+        a.status          AS status,
         a.created_at      AS created_at,
         1                 AS copy_count,
         lf.path           AS local_path
@@ -387,6 +390,7 @@ def list_videos(
             created_at=datetime.fromisoformat(str(r["created_at"])),
             local_path=str(r["local_path"]) if r["local_path"] is not None else None,
             copy_count=int(r["copy_count"]),
+            status=str(r["status"]) if r["status"] is not None else None,
         )
         for r in rows
     ]

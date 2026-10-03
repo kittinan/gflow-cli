@@ -30,13 +30,16 @@ from gflow_cli.api._retry import parse_retry_after
 from gflow_cli.api.transports._common import (
     close_menu,
     count_visible,
+    expired_link_hint,
     extract_project_id,
     flow_host_kind,
     generation_error,
+    get_signed_media,
     migrated_route,
     offered_menu_labels,
     raise_if_known_landing,
     raise_if_migrated,
+    recoverable_clip_hint,
 )
 from gflow_cli.api.transports.drivers.factory import AGENTIC_INDICATOR_SELECTORS
 from gflow_cli.api.video import (
@@ -52,10 +55,12 @@ from gflow_cli.api.video import (
     media_name_from_generate_response,
     operation_name_from_generate_response,
     parse_video_status,
+    workflow_id_from_generate_response,
 )
 from gflow_cli.errors import (
     AuthExpiredError,
     AvatarUnavailableError,
+    ConfigurationError,
     FlowAgentUiError,
     FlowAppError,
     FlowHostMigratedError,
@@ -1296,8 +1301,26 @@ class VideoGenerationMixin:
         When the transport's ``_storage_uri`` is set the video is uploaded to
         the configured cloud backend; otherwise it is written to ``out_dir``.
         """
+        from urllib.parse import urlsplit  # noqa: PLC0415 - local to the raise path
+
+        from gflow_cli.api.transports.ui_automation import (  # noqa: PLC0415 - cycle
+            _is_allowed_download_host,  # pyright: ignore[reportPrivateUsage]
+        )
+
         url = routes.media_download_url(media_id)
-        resp = await page.request.get(url, max_redirects=5, timeout=180_000)
+        # Redirects are followed here, unlike the migrated download's `max_redirects=0`:
+        # this route IS a redirect (`getMediaUrlRedirect` 302s to signed GCS). The posture
+        # the migrated arm gets from refusing redirects is recovered below by checking
+        # where the chain actually landed, since the hop target is Flow's to choose and
+        # ours to verify.
+        resp = await get_signed_media(
+            page,
+            url,
+            media_id=media_id,
+            route="media.getMediaUrlRedirect",
+            max_redirects=5,
+            remediation=recoverable_clip_hint(media_id),
+        )
         if resp.status >= 400:
             raise WireFormatError(
                 detail=(
@@ -1305,6 +1328,15 @@ class VideoGenerationMixin:
                     f"via media.getMediaUrlRedirect"
                 ),
                 status=resp.status,
+                route="media.getMediaUrlRedirect",
+                remediation_hint=expired_link_hint(media_id),
+            )
+        if not _is_allowed_download_host(resp.url):
+            raise WireFormatError(
+                detail=(
+                    "video download: refusing bytes from "
+                    f"{urlsplit(resp.url).hostname!r} (not an allowed Google host)"
+                ),
                 route="media.getMediaUrlRedirect",
             )
         body = await resp.body()
@@ -3684,11 +3716,12 @@ class VideoGenerationMixin:
     @staticmethod
     def _parse_generate_response(
         generate_resp: dict[str, Any],
-    ) -> tuple[str, str | None]:
-        """Validate HTTP status, extract media_name and flow_operation_id.
+    ) -> tuple[str, str | None, str | None]:
+        """Validate HTTP status, extract media_name, flow_operation_id and workflow_id.
 
         Raises AuthExpiredError, WafRejectionError, or WireFormatError on bad
-        status codes or missing media id. Returns (media_name, flow_operation_id).
+        status codes or missing media id. Returns (media_name, flow_operation_id,
+        workflow_id).
         """
         http_status = generate_resp.get("status")
         url = str(generate_resp.get("url", ""))
@@ -3743,7 +3776,7 @@ class VideoGenerationMixin:
         # Stored SEPARATELY from media_name even when they currently match —
         # spec explicitly keeps them distinct for future divergence.
         flow_operation_id: str | None = operation_name_from_generate_response(body)
-        return media_name, flow_operation_id
+        return media_name, flow_operation_id, workflow_id_from_generate_response(body)
 
     @staticmethod
     async def _run_stage(
@@ -4093,8 +4126,8 @@ class VideoGenerationMixin:
                     generate_resp, expected=list(request.reference_entities)
                 )
 
-            media_name, flow_operation_id = VideoGenerationMixin._parse_generate_response(
-                generate_resp
+            media_name, flow_operation_id, workflow_id = (
+                VideoGenerationMixin._parse_generate_response(generate_resp)
             )
 
             if on_started is not None:
@@ -4102,6 +4135,7 @@ class VideoGenerationMixin:
                     media_id=media_name,
                     project_id=project_id,
                     flow_operation_id=flow_operation_id,
+                    workflow_id=workflow_id,
                 )
                 await VideoGenerationMixin._fire_on_started(on_started, started)
 
@@ -4121,6 +4155,7 @@ class VideoGenerationMixin:
                 local_path=local_path,
                 project_id=project_id,
                 flow_operation_id=flow_operation_id,
+                workflow_id=workflow_id,
             )
         finally:
             # The Page is pooled and persistent — remove both listeners so they
@@ -4222,6 +4257,19 @@ class VideoGenerationMixin:
             # or a silently reused project). Park it; the next run navigates.
             await self._park_composer_page(page, event="migrated.page_park_failed")
             return result
+
+        if request.resolution is not None:
+            # #787 drives the resolution radio on flow.google.com only. This driver has no
+            # resolution step, so honouring the flag here would mean silently billing
+            # Flow's default for a user who asked for something else. Refused here, on the
+            # labs route only (the migrated one returned above), before any submit.
+            raise ConfigurationError(
+                detail=(
+                    f"--resolution {request.resolution} is not driven on the labs Flow "
+                    "editor yet; only the flow.google.com composer selects a resolution."
+                ),
+                remediation_hint="Drop --resolution to accept Flow's default on this account.",
+            )
 
         # #299: the video path binds through the mode policy like images do —
         # get_ui_driver switches to the required arm, VERIFIES via a DOM

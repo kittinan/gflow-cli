@@ -17,7 +17,12 @@ from gflow_cli.data.recorder import (
 from gflow_cli.data.redaction import ERROR_DETAIL_MAX_CHARS, redact_error_detail
 from gflow_cli.data.repository import DataRepository
 from gflow_cli.data.store import DataStore
-from gflow_cli.errors import ContentPolicyError, DataStoreError, WafRejectionError
+from gflow_cli.errors import (
+    ContentPolicyError,
+    DataStoreError,
+    MediaDownloadError,
+    WafRejectionError,
+)
 
 
 def _fetch_operations(store: DataStore) -> list[dict[str, object]]:
@@ -418,3 +423,52 @@ def test_record_completed_video_records_failed_when_not_succeeded(tmp_path: Path
         assert op["status"] == OperationStatus.FAILED.value
         assert op["error_type"] == "generation-failed"
         assert op["error_detail"] == "PUBLIC_ERROR_UNSAFE_GENERATION"
+
+
+# ---------------------------------------------------------------------------
+# #896 — a download that fails AFTER Flow reported the clip done
+# ---------------------------------------------------------------------------
+
+
+def _asset_status(store: DataStore, media_id: str) -> str:
+    (status,) = store.conn.execute(
+        "SELECT status FROM assets WHERE flow_media_id = ?", (media_id,)
+    ).fetchone()
+    return status
+
+
+def test_failed_download_records_the_clip_as_generated(tmp_path: Path) -> None:
+    """Flow said DONE and billed; only the transfer died. The asset must say so,
+    and the operation must name the download — not the generation — as what failed."""
+    with DataStore.open(tmp_path / "gflow.db") as store:
+        recorder = OperationRecorder(DataRepository(store), prompt_mode="store")
+        req = _started_video(recorder, tmp_path)
+        recorder.record_failed_operation(
+            profile_name="default",
+            profile_dir=tmp_path / "p",
+            command="video t2v",
+            mode=OperationKind.T2V,
+            exc=MediaDownloadError(detail="reset", media_id="media-1"),
+            request=req,
+            flow_media_ids=["media-1"],
+        )
+        assert _asset_status(store, "media-1") == "MEDIA_GENERATION_STATUS_SUCCESSFUL"
+        (op,) = _fetch_operations(store)
+        assert op["status"] == OperationStatus.FAILED.value
+        assert op["error_type"] == "media-download"
+
+
+def test_failed_generation_leaves_the_clip_pending(tmp_path: Path) -> None:
+    with DataStore.open(tmp_path / "gflow.db") as store:
+        recorder = OperationRecorder(DataRepository(store), prompt_mode="store")
+        req = _started_video(recorder, tmp_path)
+        recorder.record_failed_operation(
+            profile_name="default",
+            profile_dir=tmp_path / "p",
+            command="video t2v",
+            mode=OperationKind.T2V,
+            exc=WafRejectionError("poll blocked", status=403),
+            request=req,
+            flow_media_ids=["media-1"],
+        )
+        assert _asset_status(store, "media-1") == "pending"

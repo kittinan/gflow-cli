@@ -58,11 +58,21 @@ def test_the_scan_still_finds_the_direct_launchers() -> None:
     )
 
 
+# Scripts that launch a throwaway browser with NO gflow profile, so there is no lease
+# to take. Each entry needs its reason; a script that later points at a profile must
+# leave this list.
+_NO_PROFILE = {
+    # #891: an anonymous headless Chromium on about:blank -- the question it answers
+    # is identical for a logged-in profile, so it deliberately uses none.
+    "spike_mint_on_about_blank.py",
+}
+
+
 def test_every_direct_chrome_launcher_holds_the_profile_lease() -> None:
     offenders = [
         path.name
         for path in _launcher_scripts()
-        if "ProfileLease" not in path.read_text(encoding="utf-8")
+        if path.name not in _NO_PROFILE and "ProfileLease" not in path.read_text(encoding="utf-8")
     ]
     assert not offenders, (
         "these scripts launch Chrome on a real gflow profile without taking its "

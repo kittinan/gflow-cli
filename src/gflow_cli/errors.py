@@ -36,16 +36,20 @@ __all__ = [
     "FlowHostMigratedError",
     "FrameExtractionError",
     "GFlowError",
+    "IdentityRecheckPendingError",
     "MediaAttributionError",
     "MediaUploadRejectedError",
     "ReferenceNotFoundError",
     "MentionIndexUnavailableError",
     "ModelModeIncompatibilityError",
+    "MediaDownloadError",
     "NetworkError",
     "OwnerEvidence",
     "ProblemDetails",
+    "ProfileAccessError",
     "QueueSchemaError",
     "RateLimitError",
+    "RecaptchaError",
     "SceneConcatError",
     "SecurityError",
     "SyncPartialError",
@@ -213,19 +217,29 @@ class AuthExpiredError(FlowApiError):
 
 
 class AisandboxAuthError(AuthExpiredError):
-    """aisandbox-pa REST returned 401 even after a fresh SAPISIDHASH.
+    """The aisandbox-pa access token could not be obtained, or was refused.
 
     Distinct from the generic AuthExpiredError so callers (and the scene
     feature) can catch the aisandbox-specific auth failure, while still
     mapping to exit code 3 via the EXIT_CODE_MAP isinstance walk (no own
     entry needed — it inherits AuthExpiredError's code).
+
+    #803: this used to be documented and remediated as a SAPISID failure. No
+    route that raises it reads SAPISID — the credential is a Bearer token
+    minted by labs' `/fx/api/auth/session`, and SAPISID's only role is getting
+    that session to answer at all. So a SAPISID remediation names a credential
+    that is, by the time we are here, demonstrably working. Prefer an explicit
+    ``remediation_hint`` at each raise site; the default below has to stay true
+    on every route that can reach it.
     """
 
     problem_type = "https://gflow-cli.dev/errors/aisandbox-auth"
     title = "aisandbox-pa authentication failed"
     _default_remediation = (
-        "SAPISID cookie missing, expired, or unreadable. "
-        "Re-run `gflow auth login --profile <name>` and retry."
+        "Flow's session did not yield an API token that aisandbox-pa accepted. "
+        "If Flow serves this account from flow.google.com, re-authenticating will "
+        "not help — that host mints no such token. Otherwise re-run `gflow auth "
+        "login --profile <name>` and retry. See issue #803."
     )
 
 
@@ -351,6 +365,22 @@ class NetworkError(FlowApiError):
     _default_remediation = "Check connectivity and try again."
 
 
+class MediaDownloadError(NetworkError):
+    """The signed-media GET failed AFTER Flow reported the generation done (#896).
+
+    Raised only by ``get_signed_media``, so catching it means the clip exists and was
+    billed — the recorder uses it to mark the asset generated instead of leaving it
+    ``pending`` forever. Exits 6 like its parent.
+    """
+
+    problem_type = "https://gflow-cli.dev/errors/media-download"
+    title = "Generated media could not be downloaded"
+
+    def __init__(self, *args: Any, media_id: str = "", **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.media_id = media_id
+
+
 class WireFormatError(FlowApiError):
     """Carries discovery fields so ``grep error_class=WireFormatError`` in
     structured logs reveals what was unexpected, enabling new error class
@@ -429,6 +459,20 @@ class ConfigurationError(GFlowError):
     _default_remediation = (
         "Check that the transport name is registered via make_transport(). "
         "Run `gflow config list-transports` to see available strategies."
+    )
+
+
+class ProfileAccessError(ConfigurationError):
+    """Raised when Chrome cannot write its persistent profile directory."""
+
+    problem_type = "https://gflow-cli.dev/errors/profile-access"
+    title = "Profile directory not writable"
+    _default_remediation = (
+        "Check filesystem permissions or sandbox policy for the full profile "
+        "directory. Grant this process write access, or authenticate a profile "
+        "inside a writable GFLOW_CLI_HOME. Relocating only application-level lock "
+        "files is not enough; Chrome still writes its ProcessSingleton, cookie, and "
+        "crash-report files inside the profile."
     )
 
 
@@ -874,6 +918,30 @@ class FlowAccountChooserError(GFlowError):
     )
 
 
+class RecaptchaError(GFlowError):
+    """A reCAPTCHA Enterprise token could not be minted, so no request was sent (#915).
+
+    Raised by ``api.recaptcha.TokenMinter``, which only the client's own mint reaches:
+    ``gflow image upscale``, ``gflow video extend`` and image generation on a transport
+    that does not drive Flow's page (the default UI transport lets the page mint, #891).
+
+    **No exit code of its own** (exits 1, like ``FlowApiError``): callers branch on the
+    ``type``. Retryability is set per raise site from a live measurement
+    (``docs/superpowers/spikes/2026-10-01-recaptcha-error-shape.md``): a mint that lost a
+    race with a navigation succeeds on the settled page (retryable); a page with no
+    reCAPTCHA script fails the same way every time (not retryable). The class default is
+    not retryable.
+    """
+
+    problem_type = "https://gflow-cli.dev/errors/recaptcha-mint"
+    title = "reCAPTCHA token mint failed"
+    _default_remediation = (
+        "No request was sent and no credit was spent. When `retryable` is true, run the "
+        "command again; otherwise the page it ran on cannot mint, and a repeat run that "
+        "fails the same way is worth reporting with the incident ID."
+    )
+
+
 class FlowAccessUnavailableError(GFlowError):
     """Raised when Flow renders its own "you don't have access" screen for this account.
 
@@ -1107,6 +1175,25 @@ class AuthLoginTimeoutError(GFlowError):
         "The sign-in was not completed within the allowed time. "
         "Run `gflow auth login` again and complete sign-in promptly. "
         "Increase GFLOW_CLI_AUTH_LOGIN_TIMEOUT (seconds) if you need more time."
+    )
+
+
+class IdentityRecheckPendingError(AuthLoginTimeoutError):
+    """The login ended while Google still wanted this account to "Confirm it's you" (#902).
+
+    The cookies are valid, so every session probe says yes, but Flow keeps routing the
+    account to ``flow.google.com/about``, and Flow's own button there leads to Google's
+    identity re-check (measured 2026-09-23). Only the person who owns the account can
+    pass that check, because it asks for the password. Exit 12 through the isinstance
+    walk: it is still a login the user did not finish, so no new exit code.
+    """
+
+    title = "Google identity check not completed"
+    _default_remediation = (
+        'Google is asking this account to "Confirm it\'s you". Run `gflow auth login` '
+        "again, press the main button on the Flow page that opens, and finish Google's "
+        "check (it asks for your password) until the Flow app loads. gflow then closes "
+        "Chrome for you."
     )
 
 

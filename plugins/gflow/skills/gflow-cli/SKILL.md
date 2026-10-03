@@ -65,19 +65,21 @@ gflow credits list [--json]                               # all saved profiles
 
 # Image generation (Imagen / Nano Banana)
 gflow image upload <path>                                 # → asset UUID + dimensions
-gflow image t2i "<prompt>" [--model {nano2|nano-pro|image4}] \
+gflow image t2i "<prompt>" [--model {nano2|nano2-lite|nano-pro|image4}] \
                             [--aspect {9:16|16:9|1:1|4:3|3:4}] \
                             [-n 1..4] [--out DIR]
 gflow image i2i "<prompt>" --ref PATH_OR_UUID [--ref ...] [...same as t2i]
 gflow image avatar "<prompt>" [...same as t2i, minus every --ref option]  # prompt + the ACCOUNT's Flow Avatar; region gated, see below
-gflow image batch <manifest.tsv|manifest.json> [-n 1..4] [--aspect ...] [--out DIR]  # shared project, up to 5 prompts
+gflow image batch <manifest.tsv|manifest.json> [-n 1..4] [--aspect ...] [--out DIR]  # shared project, up to 5 prompts; refuses any row ref (exit 2)
+gflow run --config <batch.json>                           # JSON image batch; a row's "ref" may be "batch:N" (an earlier
+                                                          # row's image, in place, no upload) or a local file (uploaded once)
 # On migrated flow.google.com accounts (#639), t2i and i2i are ported (a project is
 # created when --project is omitted, #864): i2i accepts local --ref files only, all
 # five aspects. UUIDs, @Name/entity references, Imagen 4 (image4), and image batch
 # are refused there with exit 36.
 
 # Video generation (Veo 3.1)
-gflow video t2v "<prompt>" [--project ID] [--model ...] [--duration 4|6|8|10] [--out-dir DIR] [--aspect ...]  # without --project a project is created first, on either host (#864); 10s is omni-flash-only
+gflow video t2v "<prompt>" [--project ID] [--model ...] [--duration 4|6|8|10] [--resolution 360p|720p] [--out-dir DIR] [--aspect ...]  # --resolution: omni-flash only; without --project a project is created first, on either host (#864); 10s is omni-flash-only
 gflow video i2v --initial-frame <image|media-UUID> "<prompt>" [--out-dir DIR] [...same as t2v]  # UUID = in-project asset, no re-upload (#287; pair with --project)
 gflow video r2v "<prompt>" --ref IMG [--ref IMG ...] [--avatar]   # ingredients; --avatar adds the account likeness too
 gflow video avatar "<prompt>" [...same as t2v]                    # prompt + the ACCOUNT's Flow Avatar, no image inputs
@@ -262,7 +264,7 @@ The `gflow-cli` supports a 3-layer pipeline for persistent generation context (A
 |---|---|---|
 | `No session for profile 'default'` | First run, no auth | `gflow auth login` |
 | `403 Forbidden` from upload / generate | Account doesn't have Flow access | Verify in [labs.google/fx/tools/flow](https://labs.google/fx/tools/flow) |
-| reCAPTCHA refuses to mint a token (headless detected) | Google bot-detection | Set `GFLOW_CLI_HEADLESS=false` and re-run; the visible window passes detection |
+| reCAPTCHA refuses to mint a token (headless detected) | Google bot-detection | Set `GFLOW_CLI_HEADLESS=false` and re-run; a headed window passes detection. With `--json`, a mint failure has `type` `…/errors/recaptcha-mint` and exits 1; re-run only when `retryable` is true |
 | `Playwright Executable doesn't exist` | Chromium not downloaded | `uvx --from gflow-cli playwright install chromium` |
 | Generations all fail with the same UUID | Stale Flow session | `gflow auth login` again to refresh cookies |
 | Quota exceeded | Burned through monthly credits | Wait for reset, or upgrade subscription |

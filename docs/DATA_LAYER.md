@@ -206,6 +206,11 @@ async worker (which mirrors its `generation_queue.error_json` failure into
   `count>1` request fires the callback per output — no sibling row is
   stranded); failures before `on_started`, and all image failures, INSERT a
   fresh row with full request metadata.
+- A download whose connection drops on every retry AFTER Flow reported the clip done
+  (`MediaDownloadError`, exit 6, `error_type=media-download`, #896) also marks that
+  clip's asset `MEDIA_GENERATION_STATUS_SUCCESSFUL`: the operation failed, the
+  generation did not, and `gflow data download <media_id>` recovers it for free. An
+  HTTP error answer on the signed URL (e.g. an expired link) still leaves it `pending`.
 - A poll that COMPLETES with a Flow-reported failure (`succeeded=false`) is
   recorded as `failed` with `error_type=generation-failed` and the
   `failure_reasons` as detail — not as a success.
@@ -234,6 +239,7 @@ The data layer follows a "fail fast before billing, warn after success" contract
 | DB has a NEWER schema than installed gflow-cli | Raise `DataMigrationError` BEFORE Flow call | 16 |
 | Recorder write fails AFTER successful paid generation | Emit `data.persistence_failed_after_success` structlog event with `flow_media_id` + `local_path` when available; print yellow warning; **return 0** | 0 |
 | Batch row N fails to persist | Same warning; later rows still recorded | 0 (or 1 if other failure modes apply) |
+| A write cannot take the lock within `busy_timeout` (another process is writing) | `DataStore.transaction()` raises `DataStoreError` (#900): after a successful generation, the warning row above; anywhere else, the error | 0 after success, else 16 |
 
 **Why "warn and continue" after success?** If your `gflow video t2v` succeeds and the file lands on disk, exiting non-zero solely because the local catalog could not be updated would teach scripts to retry the paid generation. The catalog can be reconciled later by a future `gflow data repair`; the file cannot be un-billed.
 
@@ -333,6 +339,10 @@ The `images` and `videos` subcommands support an additional flag:
 By default, `images` and `videos` aggregate rows by Flow media ID. If an asset
 has multiple local copies (e.g. re-downloaded to different paths), they appear
 as a single row with a `COPIES` count and the path of the latest copy.
+
+`videos` also shows the asset `STATUS` (`status` in `--json`): `pending` until Flow
+reports the clip done, then `MEDIA_GENERATION_STATUS_SUCCESSFUL` — including when only
+the download failed (#896). Images are recorded `ready`.
 
 TTY stdout → Rich table; pipe or `--json` → JSONL. Default sort: newest first. Exit code 16 on data-store errors (same `DataStoreError` family as `gflow data media`). A **missing or freshly-created** DB is NOT a data-store error — `data list` auto-creates the schema via `DataStore.open()` and returns exit 0 with an empty result (see [#88](https://github.com/ffroliva/gflow-cli/issues/88)).
 
@@ -512,7 +522,7 @@ Every SQLite connection opened by `DataStore` enables:
 |---|---|---|
 | `foreign_keys` | `ON` | The schema declares FK constraints; SQLite ignores them by default |
 | `journal_mode` | `WAL` | Allows parallel CLI processes to read while one writes |
-| `busy_timeout` | `5000` (ms) | Two CLI processes upserting concurrently retry briefly instead of failing immediately with `database is locked` |
+| `busy_timeout` | `5000` (ms) | Two CLI processes upserting concurrently retry briefly instead of failing immediately with `database is locked`; past 5 s the write raises `DataStoreError` (#900) |
 
 Writes are explicitly grouped with `BEGIN IMMEDIATE` via `DataStore.transaction(immediate=True)` to avoid deferred-writer deadlocks under WAL. Connections use `isolation_level=None` so the transaction context manager controls boundaries explicitly.
 
@@ -535,9 +545,10 @@ See [`errors.py::EXIT_CODE_MAP`](../src/gflow_cli/errors.py) for the complete ex
 Distinct from the above (which are errors OF the data layer), the
 `operations.error_type` column stores the taxonomy of RECORDED generation
 failures — the last segment of each exception's `problem_type` URI. Common
-values: `waf-rejection` (HTTP 403 / WAF), `content-policy`, `auth-expired`,
+values: `waf-rejection` (reCAPTCHA/WAF refusal — labs HTTP 403, or a flow.google.com `PUBLIC_ERROR_UNUSUAL_ACTIVITY` envelope), `content-policy`, `auth-expired`,
 `transport-timeout`, `wire-format`, `rate-limit`, `ui-mode-unavailable`
-(cohort pin), `media-attribution`. Query them with `gflow data list errors`.
+(cohort pin), `media-attribution`, `media-download` (the clip was generated; only
+the transfer failed — recover it with `gflow data download`). Query them with `gflow data list errors`.
 
 ---
 

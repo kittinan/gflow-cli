@@ -24,11 +24,12 @@ import structlog
 from gflow_cli.api.client import FlowApiClient
 from gflow_cli.api.image import Aspect as ImageAspect
 from gflow_cli.api.image import GenerateImageRequest
+from gflow_cli.api.image import Model as ImageModel
 from gflow_cli.api.transports import migrated_composer
 from gflow_cli.api.transports._common import flow_host_kind
 from gflow_cli.api.transports.migrated_composer import MigratedComposer
 from gflow_cli.api.transports.ui_automation import UiAutomationTransport
-from gflow_cli.api.video import Aspect, GenerateVideoRequest, Mode, VideoResult
+from gflow_cli.api.video import Aspect, GenerateVideoRequest, Mode, VideoModel, VideoResult
 from gflow_cli.config import reset_settings
 from gflow_cli.errors import FlowHostMigratedError, UiSelectorDriftError
 from gflow_cli.mcp import tools as mcp_tools
@@ -439,6 +440,104 @@ async def test_e2e_t2i_runs_on_a_moved_account(
     assert "ui_driver.migrated_host_bail" not in events
 
 
+def _spy_on_client_mint(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every client-side reCAPTCHA mint -- successful or not (#891)."""
+    calls: list[str] = []
+    original = FlowApiClient._mint_recaptcha_token  # noqa: SLF001
+
+    async def spy(self: FlowApiClient, action: str) -> str:
+        calls.append(action)
+        return await original(self, action)
+
+    monkeypatch.setattr(FlowApiClient, "_mint_recaptcha_token", spy)
+    return calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.e2e_auth
+async def test_e2e_unported_image_form_is_refused_by_name(
+    e2e_profile_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#891, $0: an unported form on a fresh client is refused by the composer (exit 36,
+    naming the model), not by the client's pre-mint -- which no longer runs."""
+    project = _project_id()
+    _set_flow_host(monkeypatch, None)
+    mints = _spy_on_client_mint(monkeypatch)
+    req = GenerateImageRequest(prompt="a red cube", model=ImageModel.IMAGEN_3_5)
+    async with FlowApiClient(profile_dir=e2e_profile_dir, out_dir=tmp_path) as client:
+        page = client._page  # noqa: SLF001 - the e2e reads the live page
+        assert page is not None
+        if flow_host_kind(page.url) != "migrated":
+            pytest.skip("profile is not served flow.google.com")
+        with pytest.raises(FlowHostMigratedError, match="IMAGEN_3_5 model is not ported"):
+            await client.generate_image(project_id=project, req=req)
+
+    assert mints == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.e2e_image
+async def test_e2e_warm_client_refuses_an_unported_form_after_a_success(
+    e2e_profile_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#891: after a successful image the page is parked on ``about:blank``. The old
+    client pre-mint ran there and raised RecaptchaError ("the Flow editor page may have
+    failed to load") instead of exit 36. One image of the daily cap; the second call is
+    refused before submit."""
+    project = _project_id()
+    _set_flow_host(monkeypatch, None)
+    mints = _spy_on_client_mint(monkeypatch)
+    async with FlowApiClient(profile_dir=e2e_profile_dir, out_dir=tmp_path) as client:
+        page = client._page  # noqa: SLF001 - the e2e reads the live page
+        assert page is not None
+        if flow_host_kind(page.url) != "migrated":
+            pytest.skip("profile is not served flow.google.com")
+        image = await client.generate_image(
+            project_id=project, req=GenerateImageRequest(prompt="a plain matte grey cube")
+        )
+        assert image.media_name
+        assert client._page is not None and client._page.url == "about:blank"  # noqa: SLF001
+
+        with pytest.raises(FlowHostMigratedError, match="IMAGEN_3_5 model is not ported"):
+            await client.generate_image(
+                project_id=project,
+                req=GenerateImageRequest(prompt="a red cube", model=ImageModel.IMAGEN_3_5),
+            )
+
+    assert mints == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.e2e_auth
+async def test_e2e_mcp_unported_image_form_is_refused_by_name(
+    e2e_profile_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#891 MCP twin, $0: the queued tool reaches the same refusal as the CLI."""
+    del e2e_profile_dir  # fixture selects the real authenticated gflow home
+    project = _project_id()
+    _set_flow_host(monkeypatch, None)
+    mints = _spy_on_client_mint(monkeypatch)
+    profile = os.environ["GFLOW_CLI_E2E_PROFILE"].strip()
+
+    result = await mcp_tools.gflow_generate_image(
+        prompt="a red cube",
+        model="imagen4",
+        profile=profile,
+        project=project,
+        wait=True,
+    )
+
+    assert result["status"] == "failed", result
+    blob = str(result)
+    assert "flow-host-migrated" in blob and "IMAGEN_3_5 model is not ported" in blob, result
+    assert mints == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.e2e_image
 async def test_e2e_mcp_i2i_runs_on_the_migrated_host(
@@ -467,3 +566,136 @@ async def test_e2e_mcp_i2i_runs_on_the_migrated_host(
     assert result["params"]["reference_images"] == [str(reference)]
     files = [Path(path) for path in result["files"]]
     assert files and all(path.exists() and path.stat().st_size > 10_000 for path in files)
+
+
+def _selected(capture: structlog.testing.LogCapture, *events: str) -> list[dict[str, object]]:
+    return [dict(e) for e in capture.entries if str(e.get("event")) in events]
+
+
+@pytest.mark.asyncio
+@pytest.mark.e2e_image
+async def test_e2e_t2i_binds_nano2_lite_on_the_migrated_host(
+    e2e_profile_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_log_capture: structlog.testing.LogCapture,
+) -> None:
+    """#787: `--model nano2-lite` reaches the picker and picks the Lite row, not "Nano
+    Banana 2" (the matcher excludes Lite from NARWHAL, so the two must not collide).
+    The picker label is the only surface that names the tier; the generated image
+    itself carries no model attribution (2026-09-11 nano2-lite spike)."""
+    project = _project_id()
+    _set_flow_host(monkeypatch, None)
+    req = GenerateImageRequest(
+        prompt="a teal origami crane on a wooden table",
+        aspect=ImageAspect.LANDSCAPE,
+        model=ImageModel.HARBOR_SEAL,
+    )
+    async with FlowApiClient(profile_dir=e2e_profile_dir, out_dir=tmp_path) as client:
+        page = client._page  # noqa: SLF001 - the e2e reads the live page
+        assert page is not None
+        if flow_host_kind(page.url) != "migrated":
+            pytest.skip("profile is not on the migrated host")
+        image = await client.generate_image(project_id=project, req=req)
+
+    assert image.media_name and image.fife_url.startswith("https://flow-content.google/image/")
+    picks = _selected(
+        install_log_capture,
+        "migrated.image_model_selected",
+        "migrated.image_model_already_selected",
+    )
+    assert picks, "no model-picker event: the picker step never ran"
+    assert picks[-1]["requested"] == "HARBOR_SEAL", picks
+    assert "Lite" in str(picks[-1]["model"]), picks
+
+
+@pytest.mark.asyncio
+@pytest.mark.e2e_image
+async def test_e2e_mcp_t2i_accepts_the_nano2_lite_alias(
+    e2e_profile_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_log_capture: structlog.testing.LogCapture,
+) -> None:
+    """The MCP twin: the `nano2-lite` alias survives the queue payload and the worker."""
+    del e2e_profile_dir
+    project = _project_id()
+    _set_flow_host(monkeypatch, None)
+    result = await mcp_tools.gflow_generate_image(
+        prompt="a teal origami crane on a wooden table",
+        model="nano2-lite",
+        aspect="16:9",
+        profile=os.environ["GFLOW_CLI_E2E_PROFILE"].strip(),
+        project=project,
+        wait=True,
+    )
+    assert result["status"] == "completed", result
+    picks = _selected(
+        install_log_capture,
+        "migrated.image_model_selected",
+        "migrated.image_model_already_selected",
+    )
+    assert picks and picks[-1]["requested"] == "HARBOR_SEAL", picks
+
+
+@pytest.mark.asyncio
+@pytest.mark.e2e_video
+async def test_e2e_t2v_selects_a_resolution_on_omni_flash(
+    e2e_profile_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_log_capture: structlog.testing.LogCapture,
+) -> None:
+    """Bills one clip. #787: `--resolution 720p` on omni_flash turns the radio
+    aria-checked before submit and the clip still lands."""
+    project = _project_id()
+    _set_flow_host(monkeypatch, os.environ.get("GFLOW_CLI_E2E_FLOW_HOST") or None)
+    req = GenerateVideoRequest(
+        prompt=_PROMPT,
+        mode=Mode.T2V,
+        aspect=Aspect.LANDSCAPE,
+        model=VideoModel.OMNI_FLASH,
+        resolution="720p",
+    )
+    transport = UiAutomationTransport()
+    try:
+        await transport.setup(e2e_profile_dir)
+        result: VideoResult = await transport.generate_video(
+            request=req, project_id=project, out_dir=tmp_path, poll_timeout_s=_POLL_TIMEOUT_S
+        )
+    finally:
+        await transport.teardown()
+
+    picks = _selected(
+        install_log_capture, "migrated.resolution_selected", "migrated.resolution_already_selected"
+    )
+    assert picks and picks[-1]["resolution"] == "720p", picks
+    assert result.status.succeeded, result.status
+    assert result.local_path is not None and result.local_path.read_bytes()[4:8] == b"ftyp"
+
+
+@pytest.mark.asyncio
+@pytest.mark.e2e_video
+async def test_e2e_mcp_t2v_carries_resolution_through_the_queue(
+    e2e_profile_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_log_capture: structlog.testing.LogCapture,
+) -> None:
+    """Bills one clip. The MCP twin: `resolution` survives payload -> codec -> composer."""
+    del e2e_profile_dir
+    project = _project_id()
+    _set_flow_host(monkeypatch, os.environ.get("GFLOW_CLI_E2E_FLOW_HOST") or None)
+    result = await mcp_tools.gflow_generate_video(
+        prompt=_PROMPT,
+        mode="t2v",
+        aspect="16:9",
+        model="omni_flash",
+        resolution="360p",
+        profile=os.environ["GFLOW_CLI_E2E_PROFILE"].strip(),
+        project=project,
+        wait=True,
+    )
+    assert result["status"] == "completed", result
+    picks = _selected(
+        install_log_capture, "migrated.resolution_selected", "migrated.resolution_already_selected"
+    )
+    assert picks and picks[-1]["resolution"] == "360p", picks

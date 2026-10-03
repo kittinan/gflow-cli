@@ -68,10 +68,12 @@ cost a real run to learn; each is now a unit test in `tests/api/transports/`.
 `transport.generate_images` / upscale / extend ever run, so transport-level
 `raise_if_migrated` guards never cover it. On a moved account that page is the
 `flow.google.com` grid (client-side handoff), which loads no `recaptcha/enterprise.js`,
-so `discover_site_key` raised `RecaptchaError` — a `RuntimeError` unmapped in
-`EXIT_CODE_MAP` — as exit 1 "unexpected" instead of exit 36. The guard now runs at the
+so `discover_site_key` raised `RecaptchaError` — then a `RuntimeError` unmapped in
+`EXIT_CODE_MAP` (a typed `GFlowError` since #915) — as exit 1 "unexpected" instead of
+exit 36. The guard now runs at the
 mint too (`client.py`, `at="mint_recaptcha_token"`); `git grep raise_if_migrated` is
-the current list of sites. Reviewing anything that adds a pre-transport step: ask
+the current list of sites. Since #891 that mint guard covers only callers that really send
+the token (HTTP image transports, upscale, extend — #914); UI images no longer mint. Reviewing anything that adds a pre-transport step: ask
 "which page is the pool holding at that moment on a moved account?"
 
 Related: [[flow-recon-must-run-on-denon82-ffroliva-migrated]],
@@ -86,7 +88,10 @@ Evidence: `docs/LIVE_VERIFICATION_v0.69.0.md`; recon
 
 - **The Start-frame picker exposes no media id in its DOM.** Uploads are listed by *file
   name*, so binding is a name search — not an id lookup. Plan for name collisions rather
-  than assuming identity.
+  than assuming identity. *(#913 found an indirect id: each `@`-picker option's thumbnail
+  is `/asb/<token>`, and the project grid tile `img[data-media-id=<uuid>]` carries the same
+  token, so an option maps to an exact media id. See
+  `docs/superpowers/spikes/2026-10-01-batch-ref-dropped.md`.)*
 - **That collision arrived, as #792 — and the tie-break that lost was a sort assumption.**
   A second run of one file leaves two identical library entries; i2v leaned on the
   picker's newest-first order to pick the right one, which is an assumption about
@@ -194,12 +199,15 @@ rounds); e2e `tests/e2e/test_migrated_host_e2e.py`. Read this before re-mining t
   `flow.google.com` grid, which carries no `enterprise.js`, so the mint failed before
   any guard could classify it (#673). The client now skips minting when the transport
   reports `uses_page_owned_image_recaptcha()` and lets the project page mint + submit.
-- **Derive that capability from a latch, not from `page.url`.** The image path parks the
-  page on `about:blank` when it finishes, which routes as `labs` — so a URL-derived
-  capability answers `False` on the *second* image in one client session and falls back
-  to the very mint it exists to avoid. Invisible to every single-image test; reachable
-  from `gflow image batch`, which runs every prompt through one `FlowApiClient`. Same
-  shape as the r2v listener above: both halves correct, the join stateful and wrong.
+- **The UI transport never needed the client token at all (#891).** Nothing in
+  `ui_automation.py`, `drivers/` or `migrated_composer.py` reads `recaptcha_token`, and
+  `git log -S` shows it never did: Flow's page mints its own on click, on either host. The
+  capability is therefore unconditional. The earlier URL- and then latch-derived versions
+  existed only to decide a mint that was dead weight, and the dead mint was not harmless:
+  after a successful run the page is parked on `about:blank`, where it raised
+  `RecaptchaError` instead of exit 36. For UI images, exit 36 now comes from the
+  composer, which names the unported form. Review lesson: before tuning *when* a step
+  runs, grep whether anything consumes its output.
 - **Enumerate the axis before mapping to it.** The image aspect radiogroup carried four
   radios — `crop_16_9`, `crop_landscape`, `crop_square`, `crop_9_16` — and no
   `crop_portrait`. A driver that maps 3:4 to a guessed ligature does not fail as "not
@@ -207,3 +215,9 @@ rounds); e2e `tests/e2e/test_migrated_host_e2e.py`. Read this before re-mining t
   tells the user to file a frontend bug about a frontend that is fine. Refuse an
   unmeasured axis value as an unported form (exit 36) and keep the measured set in its
   own constant, so the difference between *observed* and *assumed* survives in code.
+- **The grid and the `@` picker are per-editor-load snapshots (#913, live e2e
+  2026-10-01).** A row that opened the editor one second after its parent was generated
+  polled the grid for 30 s without the new tile, and on another run searched the picker
+  three times with 0 options; the next row's fresh editor load found the same image at
+  once. To reference a just-generated image, reload the editor; waiting in the page does
+  not help. A reload resets the image settings, so re-apply them after it.

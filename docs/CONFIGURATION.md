@@ -31,6 +31,22 @@ See [AUTHENTICATION § Session storage](AUTHENTICATION.md#session-storage) for t
 create it — a `tools/` directory of user-authored "My Tools" TOMLs
 (`<GFLOW_CLI_HOME>/tools/*.toml`, auto-loaded; see [TOOLS.md § My Tools](TOOLS.md)).
 
+#### Profile-directory permissions at browser launch
+
+On Windows, when a generation run's browser launch fails with a Chrome
+`ProcessSingleton` error carrying access-denied code 5, gflow reports
+`ProfileAccessError`, a configuration error (exit code 11), rather than suggesting
+contention. Ensure the process can write the complete persistent profile directory,
+or use a profile inside a writable `GFLOW_CLI_HOME`. Relocating application-level
+lease locks alone does not relocate Chrome's `ProcessSingleton`, cookies, or crash
+reports.
+
+This classification covers the generation client's launch only. `gflow auth login`,
+auth verification, and the standalone and experimental transports still
+surface Chrome's raw error for the same cause; look for `ProcessSingleton` plus
+`(0x5)` in it. Launch failures without the access-denied code keep their existing
+classification; this is not general cross-platform permission-error detection.
+
 ### `GFLOW_CLI_PROFILE`
 
 **What:** Default profile name used when `--profile` isn't passed on the CLI.
@@ -333,6 +349,56 @@ GFLOW_CLI_HISTORY_PROMPTS=redacted gflow image t2i "confidential brief"
 **Default:** `false` — **headed real Chrome is the production default**, not an opt-in fallback. The `ui_automation` transport (gflow-cli's only production transport) requires a headed browser: reCAPTCHA Enterprise rejects headless Chromium with an immediate 403, so `headless=true` is not a WAF workaround — it only exists for CI/CD environments running a non-`ui_automation` transport (e.g. `bearer`/`sapisidhash`, experimental).
 **WAF-sensitive runs:** set `GFLOW_CLI_HEADLESS=false` explicitly (it is already the default, but pin it in CI/CD env files or scripts that also set `headless=true` for a different transport, so a transport switch back to `ui_automation` doesn't silently regress to a rejected headless launch).
 
+### `GFLOW_CLI_BROWSER_WINDOW_POSITION`
+
+**What:** Where on screen the headed generation browser opens, as `X,Y` in pixels.
+**Values:** `X,Y` (integers, may be negative) | empty
+**Default:** `-30000,-30000`: off-screen. Generation needs a real **headed** Chrome (see
+[`GFLOW_CLI_HEADLESS`](#gflow_cli_headless)), and without this setting that window
+opens over whatever you are working on during every run. Off-screen it is still fully
+headed, so Flow and reCAPTCHA see exactly the same browser.
+
+| Set it to | Result |
+|---|---|
+| unset | off-screen (default) |
+| `0,0`, `1920,0`, … | the window opens there: watch a run, or park it on a second monitor |
+| empty (`GFLOW_CLI_BROWSER_WINDOW_POSITION=`) | Chrome's own placement, the behaviour before this setting existed |
+
+**When to bring it back on-screen:** to watch a run, debug a step, or record a demo.
+
+**Not for a screen that needs a person.** If a run stops on an account chooser, a Google
+consent or verification screen, the error tells you to run
+`gflow auth login --profile <name>`. Do that: the login window always opens where you
+can see it, and it waits for you. A generation run does not: after clicking the
+chooser row it gives up within 30 seconds, so clearing a screen in a visible
+generation window is a race. (Flow's one-time *rights to use this image* confirmation
+has its own remedy: see [KNOWN_ISSUES](../KNOWN_ISSUES.md).)
+
+**What it does not do:** it does not stop Chrome **taking keyboard focus** when it
+launches: the `--no-focus-on-init` switch we tried made no measurable difference. If you are typing when a run starts, the
+first keystrokes can land in the (invisible) browser. Login (`gflow auth login`) is
+unaffected and always opens where you can see it.
+
+**Measured (Windows 11, 2026-09-30):** off-screen and visible runs behaved the same.
+
+| | off-screen | visible |
+|---|---|---|
+| `gflow image t2i` | image saved, 34 s | image saved, 33 s |
+| `gflow video t2v` (`veo-lite`) | video saved, 53 s, no poll stalls | video saved, 65 s, no poll stalls |
+| page `visibilityState` | `visible` | `visible` |
+| animation frames / 100 ms timer ticks in 5 s | 300 / 50 | 295 / 50 |
+
+Chrome does not throttle an off-screen window: the page still counts as visible.
+Windows clamps very large offsets, so `-30000,-30000` lands at `-21845,-21845`, still
+past any monitor, on every launch measured. A visible position such as `100,100` opened
+exactly there on 8 of 10 launches. In the other two the window was found elsewhere, and
+once it was seen moving mid-run: a visible window can be moved like any other once it
+is open. Not yet measured on macOS or
+Linux, or for runs whose polling lasts longer than about five minutes.
+Measurement script: `scripts/dev/spike_offscreen_window.py`.
+
+**Malformed values** (`100`, `1,2,3`, `a,b`) fail at startup with a validation error.
+
 ### `GFLOW_CLI_BROWSER_ENGINE`
 
 **What:** Selects the browser-automation engine backing the Playwright API.
@@ -365,7 +431,7 @@ GFLOW_CLI_HISTORY_PROMPTS=redacted gflow image t2i "confidential brief"
 - `flow.google.com` — force the migrated composer for everything, including what it cannot serve yet (those requests then exit 36/11 instead of falling back).
 - `labs.google` — never use the migrated composer; where Flow serves `flow.google.com`, requests fail with exit 36 (kill switch).
 **Default:** `auto`
-**Scope today:** the migrated composer covers `gflow video t2v`, local-file `video i2v` / `r2v`, `gflow image t2i`, and local-file `gflow image i2i`. Images support Nano Banana 2 / Pro, all five aspect ratios (16:9, 4:3, 1:1, 3:4, 9:16 — `3:4` was added to that host's radiogroup by 2026-09-17, #864) and count 1–4; the page owns the `ogiZ0b` reCAPTCHA + submit and the response already contains completed signed image URLs. Local-file start+end frames (`--initial-frame` + `--end-frame`) are ported (#639). Frames or references given by UUID/`@Name`, character entities, Agent instructions, Imagen 4, scenes, extend, instructions and tools are not ported yet and fail before submit where Flow serves flow.google.com. MCP uses the same image service and queue payload, and inherits this setting from the server/daemon environment rather than per call.
+**Scope today:** the migrated composer covers `gflow video t2v`, local-file `video i2v` / `r2v`, `gflow image t2i`, and local-file `gflow image i2i`. Images support Nano Banana 2 / 2 Lite / Pro, all five aspect ratios (16:9, 4:3, 1:1, 3:4, 9:16 — `3:4` was added to that host's radiogroup by 2026-09-17, #864) and count 1–4; the page owns the `ogiZ0b` reCAPTCHA + submit and the response already contains completed signed image URLs. Local-file start+end frames (`--initial-frame` + `--end-frame`) are ported (#639). Frames or references given by UUID/`@Name`, character entities, Agent instructions, Imagen 4, scenes, extend, instructions and tools are not ported yet and fail before submit where Flow serves flow.google.com. MCP uses the same image service and queue payload, and inherits this setting from the server/daemon environment rather than per call.
 
 ### `GFLOW_CLI_PREFER_CLASSIC` *(deprecated — use `GFLOW_CLI_UI_MODE=classic`)*
 
@@ -557,5 +623,7 @@ gflow image t2i "test idea" --profile experiments
 | `ValidationError: GFLOW_CLI_TIMEOUT_SECONDS must be a positive integer` | Bad `.env` value | Set to a number ≥ 1 |
 | `FileNotFoundError: $GFLOW_CLI_HOME/profile_default not found` | First run, no auth yet | `gflow auth login` |
 | `AuthExpiredError` | Cookies expired or revoked | `gflow auth login --profile <name>` |
+| A run stops on an account chooser, consent or verification screen (`FlowAccountChooserError`, exit 38) | Google wants a person to answer that screen | `gflow auth login --profile <name>` and clear it there; the login window is always visible. Making the generation window visible does not help: the run gives up within 30 s. See [`GFLOW_CLI_BROWSER_WINDOW_POSITION`](#gflow_cli_browser_window_position) |
+| `ProfileAccessError` (exit code 11) | Chrome cannot write the profile directory (Windows access denied) | Grant write access to the whole profile directory, or use a writable profile. See [Profile-directory permissions](#profile-directory-permissions-at-browser-launch) |
 | Output files don't appear where I expect | Flag > env > .env > default — check actual resolved path | `gflow image t2i ... --verbose` shows the resolved output path |
 | `ProfileLockedError` (exit code 11) | Two concurrent calls against the same profile — the cross-process `ProfileLease` fails fast (never waits) on same-profile contention, whether the second holder is another `gflow` process, the `gflow serve` daemon, or an MCP call | Wait for the first call to finish, or use `--profile other` — different profiles run fully in parallel, each with its own lease |

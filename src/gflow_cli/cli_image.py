@@ -222,6 +222,10 @@ def _warn_persistence_failed_after_success(
     logger.warning(
         "data.persistence_failed_after_success",
         error_class=type(exc).__name__,
+        # Since #900 every sqlite fault in a catalog write arrives as DataStoreError, a
+        # real bug as well as a lock; the class alone no longer tells them apart.
+        detail=getattr(exc, "detail", None) or str(exc),
+        route=getattr(exc, "route", None),
         flow_media_id=flow_media_id,
         local_path=str(local_path) if local_path is not None else None,
     )
@@ -1541,6 +1545,14 @@ def batch(
         )
     except ConfigurationError as exc:
         raise _as_usage_error(exc) from exc
+    for row in prompts:
+        if row.ref is not None:
+            # The stay-mounted batch path cannot reference an earlier row (#913).
+            msg = (
+                f"prompts[{row.index}].ref: manifest references (an earlier row or a "
+                "local file) work with `gflow run --config`, not `gflow image batch`."
+            )
+            raise click.UsageError(msg)
 
     # Apply --tool to each manifest row before submission (≤5 prompts, sequential,
     # never-fatal per row; unknown tool/style fails fast pre-network).

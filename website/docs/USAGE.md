@@ -265,7 +265,7 @@ Options:
                             to disable. Widen (e.g. 10-30) if runs hit WAF
                             403s. [default: 0.5-1.5; GFLOW_CLI_JITTER_RANGE
                             overrides the default]
-  --model [nano2|nano-pro|image4]
+  --model [nano2|nano-pro|nano2-lite|image4]
                             Image model alias.                [default: nano2]
   --aspect [9:16|16:9|1:1|4:3|3:4]
                             Aspect ratio.                     [default: 9:16]
@@ -299,6 +299,7 @@ Options:
 |---|---|---|
 | `nano2` | Nano Banana 2 (`NARWHAL`) | Default. Fast, balanced quality. |
 | `nano-pro` | Nano Banana Pro (`GEM_PIX_2`) | Higher quality, slower. |
+| `nano2-lite` | Nano Banana 2 Lite (`HARBOR_SEAL`) | Lightweight Nano Banana 2 variant. Its i2i reference cap is a provisional 3 and its daily quota is unmeasured (#787). |
 | `image4` | Imagen 4 (`IMAGEN_3_5`) | Photoreal-leaning Imagen variant. |
 
 **Multi-prompt shortcut.**
@@ -398,7 +399,7 @@ Arguments:
 
 Options:
   --ref PATH_OR_UUID        Reference image. Repeat for multiple. [required]
-  --model [nano2|nano-pro|image4]
+  --model [nano2|nano-pro|nano2-lite|image4]
                             Image model alias.                [default: nano2]
   --aspect [9:16|16:9|1:1|4:3|3:4]
                             Aspect ratio.                     [default: 9:16]
@@ -588,6 +589,10 @@ an isometric pixel-art bakery	1	1:1	nano2
 
 ### JSON manifest
 
+`gflow image batch` refuses any `ref` or `reference_entity` in a row (exit 2) —
+`"ref": "batch:N"` and local files included. Use `gflow run --config`
+([earlier row](#referencing-an-earlier-row), [local file](#referencing-a-local-file)).
+
 ```json
 [
   {"text": "a small calico kitten sitting on a windowsill"},
@@ -672,9 +677,14 @@ All prompts in a batch share one Flow project. The editor is opened once and sta
 Generate a video from a text prompt only.
 
 ```text
-gflow video t2v PROMPT [--model] [--duration] [--count] [--aspect] [--ui-mode] [--profile] [-t/--tool] [--project] [--out-dir] [-o/--output]
+gflow video t2v PROMPT [--model] [--duration] [--resolution] [--count] [--aspect] [--ui-mode] [--profile] [-t/--tool] [--project] [--out-dir] [-o/--output]
 
 Options:
+  --resolution [360p|720p]
+                        Video resolution ('360p' or '720p', supported on omni-flash; on any other
+                        model, or on the labs editor, the run stops before submit with exit 11
+                        and no credits spent).
+                        Omit for Flow's default.
   -o, --output PATH     Explicit destination file path for the generated asset
                         (e.g., `./out/clip.mp4`). Overrides automatic filename.
   --project ID          Generate in this EXISTING Flow project instead of a
@@ -740,7 +750,7 @@ the editor's frame slot via the media dialog, then Flow fires
 > browse the project's library on flow.google.com.
 
 ```text
-gflow video i2v --initial-frame INITIAL [--end-frame LAST] PROMPT [--model] [--duration] [--count] [--aspect] [--ui-mode] [...]
+gflow video i2v --initial-frame INITIAL [--end-frame LAST] PROMPT [--model] [--duration] [--resolution] [--count] [--aspect] [--ui-mode] [...]
 
 # Back-compat positional form (still supported):
 gflow video i2v IMAGE PROMPT [--end-frame LAST] [...]
@@ -752,6 +762,10 @@ Options:
   --initial-frame PATH|UUID  Initial frame to animate: local image path or in-project
                              asset media UUID. Canonical form; replaces the positional IMAGE.
   --end-frame PATH|UUID      Optional end frame — Flow interpolates initial frame -> end frame.
+  --resolution [360p|720p]   Video resolution ('360p' or '720p', supported on omni-flash; on any other
+                        model, or on the labs editor, the run stops before submit with exit 11
+                        and no credits spent).
+                             Omit for Flow's default.
   --project ID               Generate in this EXISTING Flow project instead of a
                              scratch project (see "Sharing one project across calls").
   -o, --output PATH          Explicit destination file path for the mp4 (parents
@@ -784,12 +798,16 @@ images. Per-model cap: `omni-flash` ≤7, the `veo-*` models ≤3. Fires
 `batchAsyncGenerateVideoReferenceImages`.
 
 ```text
-gflow video r2v PROMPT --ref IMG [--ref IMG ...] [--model] [--duration] [--count] [--aspect] [...]
+gflow video r2v PROMPT --ref IMG [--ref IMG ...] [--model] [--duration] [--resolution] [--count] [--aspect] [...]
 
 Options:
-  --ref PATH    Reference image; repeat for up to 7 (omni-flash) / 3 (veo). [required]
-  --project ID  Generate in this EXISTING Flow project instead of a scratch
-                project (see "Sharing one project across calls").
+  --ref PATH                Reference image; repeat for up to 7 (omni-flash) / 3 (veo). [required]
+  --resolution [360p|720p]  Video resolution ('360p' or '720p', supported on omni-flash; on any other
+                        model, or on the labs editor, the run stops before submit with exit 11
+                        and no credits spent).
+                            Omit for Flow's default.
+  --project ID              Generate in this EXISTING Flow project instead of a scratch
+                            project (see "Sharing one project across calls").
 ```
 
 ```bash
@@ -1479,6 +1497,75 @@ Options:
   --dry-run             Preview dead rows without deleting.
   --profile NAME        Limit scan to a specific profile.
 
+## `gflow data download`
+
+Fetch an already-generated **video** from Flow by its media ID, for the case where the
+generation succeeded but its download did not.
+
+> **Video only.** The signed URL this needs comes from a record Flow emits when a clip's
+> own route loads, and an image's route does not carry one. An image media ID is refused
+> immediately with exit 11 and a message saying so — it does not open a browser or wait.
+> Tracked in [#877](https://github.com/ffroliva/gflow-cli/issues/877).
+
+That case is real and costs money: on `flow.google.com` a generation whose signed media
+URL is not observed within the grace window exits 7 (`WireFormatError`) **after the
+credit has been spent**. The clip is in the Flow project, the catalog has a row for it,
+and before this command there was no way to fetch it — the only recovery the CLI offered
+was to run the generation again and pay a second time.
+
+Recovering costs **nothing**. The asset was already billed.
+
+The transfer **retries a dropped connection by itself** — three attempts, sub-second
+backoff, all inside the same timeout rather than multiplying it. A reset that survives
+all three exits **6** (`NetworkError`, retryable) and says what to do, instead of the
+bare `Unexpected error` it used to raise
+([#895](https://github.com/ffroliva/gflow-cli/issues/895)). Re-running is safe and still
+costs nothing: each attempt asks Flow for a fresh signed link.
+
+```text
+gflow data download MEDIA_ID [--out DIR] [--profile NAME] [--json]
+
+Arguments:
+  MEDIA_ID              Flow media UUID of the asset to fetch. [required]
+
+Options:
+  --out DIR             Directory to write into.
+                        Default: $GFLOW_CLI_OUTPUT_DIR.
+  --profile NAME        Scope the catalog lookup to a specific profile.
+                        Default: search all profiles.
+  --json                Emit a JSON summary instead of a table.
+```
+
+The command opens the clip's own route in Flow, takes the signed URL Flow reports for it,
+and **verifies the bytes against the size Flow records** before writing. That size check
+is not belt-and-braces: the same asset is also served as 360p and 720p re-encodes that
+carry valid MP4 magic bytes, so a magic-byte check alone would happily save the wrong
+file. A mismatch is an error, never a warning.
+
+On success the `local_files` row is written too, so `gflow data list videos` stops
+reporting `copy_count: 0` for an asset that is now on disk.
+
+**Example:**
+
+```text
+$ gflow data download 9ad33c78-5762-4cbc-bcbe-07a4c3b061c7
+          gflow data download
+┌────────────┬──────────────────────────────────────┐
+│ media_id   │ 9ad33c78-5762-4cbc-bcbe-07a4c3b061c7 │
+│ profile    │ ffroliva                             │
+│ project_id │ 339f65ee-fec3-436e-bdd1-fa2acdbf4afd │
+│ path       │ ./out/9ad33c78-....mp4               │
+│ bytes      │ 2702168                              │
+└────────────┴──────────────────────────────────────┘
+```
+
+Exits 16 when the catalog has no row for the media ID (or the ID exists under several
+profiles — pass `--profile` to disambiguate), and 7 when Flow does not report a usable
+media URL for it, which is also what you get for a clip that has been moved to trash.
+
+See [#865](https://github.com/ffroliva/gflow-cli/issues/865) and
+[#871](https://github.com/ffroliva/gflow-cli/issues/871).
+
 ## `gflow data media`
 
 Look up a recorded operation by its Flow media ID. Prints a summary of the stored provenance record: profile, media ID, Flow project ID, kind (image/video), and the local paths or cloud URIs that were written for that operation.
@@ -1789,6 +1876,11 @@ use. When set:
   `dimensions`, `fife_url`, `is_signed_url`) plus the on-disk `local_path`;
   `ref_count` is included on `i2i`. Single-prompt only — `--json` rejects
   multi-prompt batches with a Click usage error.
+  **`model_name_type` is `null` when Flow served the account from
+  `flow.google.com`** — that host's reply carries no model field, and gflow
+  reports what it observed rather than echoing your `--model` back (#789). It is
+  also `null` in the `model` column of `gflow data` for those assets. On
+  `labs.google` it is Flow's own value, e.g. `"NARWHAL"`.
 - `video t2v/i2v/r2v` emits the `VideoResult` (`status`, `command`, `media_id`,
   `generation_status`, `succeeded`, `local_path`, `failure_reasons`,
   `error_message`) plus the request echo (`model`, `mode`, `aspect`,
@@ -1821,7 +1913,7 @@ gflow run --config FILE [--output-dir DIR] [--profile NAME] [--continue-on-error
 
 The config is a JSON file with a top-level `prompts` array; each entry
 produces 1–4 images through one `FlowApiClient` session (one Playwright
-browser, one Flow project, sequential reCAPTCHA mints).
+browser, one Flow project; prompts run one after another).
 
 ### Config schema
 
@@ -1854,6 +1946,7 @@ browser, one Flow project, sequential reCAPTCHA mints).
 | `prompts[].model` | no | `nano2` | `nano2` / `nano-pro` / `imagen4`. |
 | `prompts[].count` | no | `1` | 1–4. |
 | `prompts[].output_filename` | no | `prompt_<index>` | Filename stem; saved as `<stem>_<image-index>.png`. |
+| `prompts[].ref` | no | — | `"batch:N"` (generate from row N's image) or a local image file. See [Referencing an earlier row](#referencing-an-earlier-row) and [Referencing a local file](#referencing-a-local-file). |
 | `profile` | no | active profile | CLI `--profile` overrides. |
 | `transport` | no | `ui_automation` | Experimental strategies need `GFLOW_CLI_EXPERIMENTAL_TRANSPORTS=1`. |
 | `output_dir` | no | `out/<UTC-timestamp>/` | CLI `--output-dir` overrides. |
@@ -1863,6 +1956,64 @@ browser, one Flow project, sequential reCAPTCHA mints).
 `--continue-on-error` (default): one prompt failing logs the error and continues. Final exit code is the max per-prompt exit code (so a `WafRejectionError` anywhere in the batch makes the whole run exit 10).
 
 `--fail-fast`: first failure stops the batch. Remaining prompts are reported as SKIPPED in the summary table.
+
+A row skipped because its parent failed (see below) is not an error of its own: the run exits with the parent's code.
+
+### Referencing an earlier row
+
+A row can generate from the image another row made: set `"ref": "batch:N"`, where `N` is
+that row's position in `prompts` (0-based).
+
+```json
+{
+  "prompts": [
+    {"text": "a single red apple on a wooden table", "aspect_ratio": "1:1"},
+    {"text": "the same apple, now green", "aspect_ratio": "1:1", "ref": "batch:0"},
+    {"text": "the green apple on a blue plate", "aspect_ratio": "1:1", "ref": "batch:1"}
+  ]
+}
+```
+
+- **Nothing is uploaded.** Row N's image is already in the run's Flow project, so it is
+  referenced where it is, by the handle Flow returned when it was generated. The project
+  holds no duplicate.
+- **Order.** Rows run in file order; a row that references a later row waits only until
+  that row has run. Output names and the results table keep each row's own number.
+- **A referenced row must make one image** (`"count": 1`, the default), so `batch:N`
+  names exactly one image. Anything else is refused before the browser starts (exit 11),
+  as are an out-of-range row, a row referencing itself, a cycle, and any form other than
+  `batch:<number>` (no spaces, signs or leading zeros).
+- **A failed parent.** Its direct dependents are skipped with "parent row N failed",
+  and theirs with "parent row M was skipped"; none is submitted without its reference. A parent whose image
+  was generated but whose download failed still counts as generated: its children run.
+- **Tracking.** Each row is recorded in the local catalog; a referencing row is recorded
+  as image-to-image with its parent as the input (`gflow data`).
+- **No resume.** A re-run starts a new project and regenerates every row, parents
+  included.
+- **`batch:N` or a local file.** A media id or `reference_entity` in a row is refused
+  (exit 11); for those use `gflow image i2i --ref` or `--reference-entity`.
+- **A parent Flow returned without a caption** cannot be found in the composer's `@`
+  picker, so its child is refused (exit 36, "an image Flow returned without a caption").
+- **Measured on flow.google.com** (2026-10-01). An account served labs takes a different
+  driver, which references the image by its media id; that arm has not been observed.
+
+### Referencing a local file
+
+A row's `ref` can also be a local image: `"ref": "refs/product.png"`.
+
+- **Resolved against the config file's folder** (an absolute path also works), so a config
+  and its images move together. The file must exist and be a real image (PNG, JPEG, WebP or
+  GIF, up to 20 MB) before the browser starts; anything else is refused (exit 11).
+- **Uploaded once per run.** The first row that names a file uploads it into the run's
+  project; every row that names the same file references that upload in place. The
+  project holds one copy.
+- **A failed upload** fails that row with the reason; a later row naming the same file
+  tries the upload again.
+- **Not resumable.** A re-run uploads the file again into its new project.
+- **Measured on flow.google.com** (2026-10-01). When Flow serves the project from labs,
+  the file goes through the REST upload instead; that path has not been observed live.
+  `GFLOW_CLI_FLOW_HOST=labs.google` on a project Flow serves from flow.google.com is
+  refused (exit 36), not rerouted.
 
 ### Example
 
@@ -2005,17 +2156,17 @@ shell scripts can branch on the failure mode without parsing stderr.
 | Code | Error class           | Meaning                                          | Remediation                                                |
 |------|-----------------------|--------------------------------------------------|------------------------------------------------------------|
 | `0`  | —                     | Success                                          | —                                                          |
-| `1`  | unhandled exception   | Anything not derived from `GFlowError` — **or a deliberate CLI verdict**: `gflow auth status` exits 1 for a dead/unverifiable session | Re-run with `--verbose`; for `auth status` follow the printed hint; file a bug if it persists |
+| `1`  | unhandled / unmapped  | Anything not derived from `GFlowError`, a typed error with no code of its own (e.g. a reCAPTCHA mint failure, `type` `…/errors/recaptcha-mint`, [#915](https://github.com/ffroliva/gflow-cli/issues/915) — branch on the `--json` `type`) — **or a deliberate CLI verdict**: `gflow auth status` exits 1 for a dead/unverifiable session | Re-run with `--verbose`; for `auth status` follow the printed hint; file a bug if it persists |
 | `2`  | usage error (Click)   | Bad usage / missing arg / profile missing        | Standard CLI usage error                                   |
 | `3`  | `AuthExpiredError`    | Session cookies rejected by Flow (401/403), or Flow served one of its OAuth/sign-in routes instead of the page gflow asked for ([#756](https://github.com/ffroliva/gflow-cli/issues/756)) | `gflow auth login --profile <name>` — **but read the error's own `remediation_hint` first.** `AisandboxAuthError` shares this code, and when `gflow credits` fails on an account migrated to `flow.google.com` re-logging in cannot help and can roll the profile's browser-strategy marker back ([#795](https://github.com/ffroliva/gflow-cli/issues/795), [#791](https://github.com/ffroliva/gflow-cli/issues/791)) |
 | `4`  | `RateLimitError`      | Quota / rate limit hit, exhausted retries        | Wait + reduce `GFLOW_CLI_CONCURRENCY`                      |
 | `5`  | `ContentPolicyError`  | Flow rejected the prompt (200 + empty `media[]`) | Soften prompt wording                                      |
-| `6`  | `NetworkError`        | Network failure persisted across 3 attempts      | Check connectivity                                         |
+| `6`  | `NetworkError`        | Network failure persisted across 3 attempts — including a signed-media download whose connection dropped on every attempt ([#895](https://github.com/ffroliva/gflow-cli/issues/895)) | Check connectivity — **but read the error's own `remediation_hint` first.** When a *generation* download fails this way the clip was already produced and billed: the hint names it, and `gflow data download <media_id>` recovers it for free. Re-generating pays twice |
 | `7`  | `WireFormatError`     | Unexpected response shape — Flow API changed     | File a bug (do NOT include captured tokens or signed URLs) |
 | `8`  | `AuthMissingError`    | Required auth credential is absent from profile   | `gflow auth login --profile <name>`                        |
 | `9`  | `TransportTimeoutError` | Browser/API operation exceeded its timeout (incl. an i2v frame UUID not found in the media picker, #287; or a wedged submission stage — the error names the stage and your Playwright version) | Retry; raise the relevant timeout — for a frame-UUID miss verify the UUID belongs to the `--project` passed; for a `stage_stalled` abort check your Playwright is in range (see [KNOWN_ISSUES](../KNOWN_ISSUES.md)) |
 | `10` | `WafRejectionError`   | Flow security layer rejected the request          | Change prompt/request and retry                            |
-| `11` | `ConfigurationError`  | Local configuration or browser mode is invalid — on the migrated `flow.google.com` host also a request the host cannot take as given (no `--project`, a model its menu does not offer, a `--duration` its settings pane renders no control for); includes `ProfileLockedError` (same-profile lease contention: another `gflow`/daemon/MCP call already owns this profile) and `ProfileEngineDowngradeError` (the profile was last written by a newer Chromium major than the bundled engine about to open it — see [AUTHENTICATION § Chromium downgrade guard](AUTHENTICATION.md#chromium-downgrade-guard)) | Fix the option/env var shown in the error; for lease contention wait, use a different `--profile`, or set `GFLOW_CLI_LEASE_WAIT_SECONDS=N` to wait bounded; upgrade gflow-cli/Playwright or re-run `gflow auth login` for a downgrade refusal |
+| `11` | `ConfigurationError`  | Local configuration or browser mode is invalid — on the migrated `flow.google.com` host also a request the host cannot take as given (no `--project`, a model its menu does not offer, a `--duration` its settings pane renders no control for); includes `ProfileLockedError` (same-profile lease contention: another `gflow`/daemon/MCP call already owns this profile), `ProfileAccessError` (Windows Chrome cannot write the profile directory; raised at the generation client's launch), and `ProfileEngineDowngradeError` (the profile was last written by a newer Chromium major than the bundled engine about to open it — see [AUTHENTICATION § Chromium downgrade guard](AUTHENTICATION.md#chromium-downgrade-guard)) | Fix the option/env var shown in the error; for lease contention wait, use a different `--profile`, or set `GFLOW_CLI_LEASE_WAIT_SECONDS=N` to wait bounded; for profile access denial grant write access to the complete profile directory or use a writable profile; upgrade gflow-cli/Playwright or re-run `gflow auth login` for a downgrade refusal |
 | `12` | `AuthLoginTimeoutError` | Browser sign-in was not completed in time       | Re-run login or raise `GFLOW_CLI_AUTH_LOGIN_TIMEOUT`       |
 | `13` | `SecurityError`       | Unsafe local profile or secret handling blocked   | Follow the error's safety guidance                         |
 | `14` | `AuthBrowserRejectedError` | Sign-in rejected the browser for `navigator.webdriver` | Re-run `gflow auth login`; with Chrome installed the `chrome` strategy retries automatically |
@@ -2040,7 +2191,7 @@ shell scripts can branch on the failure mode without parsing stderr.
 | `33` | — (`gflow doctor` verdict) | Doctor found warn/fail findings — a successful diagnosis, not an error class | Review the report; see [`gflow doctor`](#gflow-doctor) |
 | `34` | `SyncPartialError`    | `gflow data sync` failed on some projects but succeeded on others — completed writes stay committed | Retryable: re-run the same command; it resumes with what is still nameless (see [`gflow data sync`](#gflow-data-sync)) |
 | `35` | `ExtendUnavailableError` | No Veo extend model is orderable for this account and aspect — the extend family is tier-gated and there is no square variant. **Never auto-retry**: a tier gate does not clear on its own. |
-| `36` | `FlowHostMigratedError` | Flow served the project from `flow.google.com` and the request could not be represented by the migrated composer, or `GFLOW_CLI_FLOW_HOST=labs.google` disabled it. Supported today: `video t2v`; local-file video i2v/r2v; `image t2i`; and local-file `image i2i`. Image UUID/entity/instruction/Imagen-4 forms and `image batch` remain unsupported. Not selector drift (23) | **Not retryable.** Use one of the supported forms, or the REST surface (`gflow project list`, `gflow data …`); follow #639 for the remaining matrix |
+| `36` | `FlowHostMigratedError` | Flow served the project from `flow.google.com` and the request could not be represented by the migrated composer, or `GFLOW_CLI_FLOW_HOST=labs.google` disabled it. Supported today: `video t2v`; local-file video i2v/r2v; `image t2i`; local-file `image i2i`; and `gflow run --config` rows referencing an earlier row (`batch:N`) or a local file. Image UUID/entity/instruction/Imagen-4 forms and `image batch` remain unsupported. Not selector drift (23) | **Not retryable.** Use one of the supported forms, or the REST surface (`gflow project list`, `gflow data …`); follow #639 for the remaining matrix |
 | `37` | `InsufficientCreditsError` | The account's balance is short **for the model it asked for**, so Flow **replaced** the submit control with its `Insufficient credits warning` instead of disabling it. Short, not necessarily empty: measured 2026-09-07, an account holding **50** credits requesting `--model veo-quality` (**100**) rendered the warning. Explicitly **not** selector drift (23): reporting it as drift told users to file a frontend bug over a credit shortfall | Check the balance with `gflow credits user`, then pick a cheaper `--model` (`veo-lite` costs 10), top up, or wait for the allowance to reset. Nothing was submitted, so no credit was spent. `gflow image` draws on a separate daily quota and may still work |
 | `38` | `FlowAccountChooserError` | The post-migration hop landed on Google's account chooser and the profile's recorded account (`.gflow_account`) could not be selected automatically (row absent, click-through did not return to the editor, or `--account` mismatch) | **Not retryable**: run `gflow auth login --profile <name>` and complete the chooser manually, while signed in as the recorded account (re-run `gflow auth login` if the chooser offers a different session) |
 | `39` | `FlowAccessUnavailableError` | Flow loaded and routed to its own "you don't have access" screen (`<flow-pinhole-unavailable-screen>`): this Google account has no Flow entitlement. Detected by component, not by URL — the hop is client-side (`flow.google.com/` answers 200) and the path varies (`/unavailable`, `/u/8/unavailable`). Explicitly **not** auth expiry (3/8) and **not** selector drift (23): nothing expired and nothing drifted | **Not retryable, and signing in again cannot change it.** Flow needs an age-verified account in a supported region on a Google AI Plus/Pro/Ultra or qualifying Workspace plan — check which applies at [Google's eligibility page](https://support.google.com/flow/answer/16353333) and open https://flow.google.com in a browser on this account to confirm |
@@ -2050,6 +2201,12 @@ shell scripts can branch on the failure mode without parsing stderr.
 **Exit code 16 — data store / migration error.** Fires when:
 
 - The database file cannot be opened (filesystem permission or path issues).
+- A write could not take the database lock within 5 s (`database is locked` — another
+  gflow process was writing). After a **successful** `gflow image` or `gflow video`
+  generation this is only a warning (`data.persistence_failed_after_success`, naming the
+  media id): the file is saved and the run succeeds, it is just not recorded in the
+  catalog (#900). `gflow movie` logs its own `movie.persistence_failed_*` warning; a task
+  on the MCP worker queue records it as the task's error.
 - A migration fails or the migration checksum drifts from what the installed version expects.
 - The database has a **newer schema** than the installed gflow-cli (i.e. you downgraded after a migration already ran).
 

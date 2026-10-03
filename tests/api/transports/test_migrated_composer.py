@@ -297,6 +297,14 @@ class FakeLocator:
     async def is_visible(self) -> bool:
         return bool(self.items) and self._visible_now
 
+    async def scroll_into_view_if_needed(self, **_: Any) -> None:
+        await asyncio.sleep(0)
+
+    async def bounding_box(self) -> dict[str, float] | None:
+        if not self.items:
+            return None
+        return {"x": 0.0, "y": 0.0, "width": 10.0, "height": 10.0}
+
     async def is_enabled(self) -> bool:
         if self.kind == "submit":
             dom = self.page.dom
@@ -563,6 +571,15 @@ class FakePage:
     def remove_listener(self, event: str, handler: Any) -> None:
         self._handlers[event] = [h for h in self._handlers[event] if h is not handler]
 
+    async def route(self, _url: Any, _handler: Any) -> None:
+        # The submit guard (#913) is installed here; this double fires requests through
+        # its listeners, so the observer path these tests pin still runs. The guard
+        # itself is covered in test_migrated_existing_refs.py.
+        return None
+
+    async def unroute(self, _url: Any, _handler: Any) -> None:
+        return None
+
     def listeners(self, event: str) -> list[Any]:
         return list(self._handlers[event])
 
@@ -587,6 +604,11 @@ class FakePage:
 
     def expect_file_chooser(self, **_: Any) -> FakeChooserContext:
         return FakeChooserContext(self)
+
+    async def evaluate(self, expression: str, argument: Any = None) -> Any:
+        if "elementFromPoint" in expression:
+            return {"target": True, "top": None}
+        return {}
 
     def locator(self, css: str, *, scope: FakeLocator | None = None) -> FakeLocator:
         dom = self.dom
@@ -810,6 +832,32 @@ async def test_apply_video_settings_selects_each_axis_and_reads_back() -> None:
     assert page.dom.groups["duration"][1].checked  # 6s
     assert page.dom.groups["count"][1].checked  # x2
     assert not page.dom.pane_open  # closed afterwards
+
+
+async def test_apply_video_settings_selects_resolution() -> None:
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakePage()
+    assert page.dom.groups["resolution"][1].checked  # default 720p
+
+    await MigratedComposer().apply_video_settings(page, _t2v(resolution="360p"))
+    assert page.dom.groups["resolution"][0].checked  # 360p
+    assert not page.dom.groups["resolution"][1].checked
+
+    await MigratedComposer().apply_video_settings(page, _t2v(resolution="720p"))
+    assert page.dom.groups["resolution"][1].checked
+    assert not page.dom.groups["resolution"][0].checked
+
+
+async def test_apply_video_settings_resolution_row_absent_raises() -> None:
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+    from gflow_cli.errors import ConfigurationError
+
+    page = FakePage()
+    del page.dom.groups["resolution"]
+
+    with pytest.raises(ConfigurationError, match="renders no resolution control offering '360p'"):
+        await MigratedComposer().apply_video_settings(page, _t2v(resolution="360p"))
 
 
 async def test_the_consent_bar_is_cleared_on_the_video_path_too() -> None:
@@ -1274,6 +1322,8 @@ async def test_submit_observes_submit_then_poll_then_result() -> None:
         started and started[0].media_id == MEDIA and started[0].flow_operation_id == rec.workflow_id
     )
     assert started[0].project_id == PROJ
+    # #898: record slot 0 is Flow's workflow id (wire spike 2026-09-05); carry it by name.
+    assert started[0].workflow_id == rec.workflow_id
     assert page.dom.submit_clicked == 1
 
 
@@ -2913,6 +2963,30 @@ async def test_image_submit_decodes_the_ogiz0b_reply() -> None:
     assert page.dom.submit_clicked == 1
 
 
+async def test_the_migrated_reply_reports_no_model_because_it_carries_none() -> None:
+    """#789: the `ogiZ0b` reply has no model field, so gflow must report none.
+
+    Echoing `request.model` back made the catalogue assert an attribution nobody
+    observed — and `recorder.py` persists it as `AssetRecord.model`, so `gflow
+    data` reads the echo back as though Flow had confirmed it. That is the same
+    class of claim #788 is about: a hidden picker can leave a *different* model
+    selected, in which case the echo is not merely unverified but wrong, and it
+    is the field a user would check to find out.
+    """
+    from gflow_cli.api.image import GenerateImageRequest
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakePage()
+    page.dom.prompt = "a blue cup"
+    page.scripted_responses = [(_batch_url("ogiZ0b"), _image_frame())]
+
+    images = await MigratedComposer().submit_images_and_observe(
+        page, GenerateImageRequest(prompt="a blue cup")
+    )
+
+    assert images[0].model_name_type is None
+
+
 async def test_an_image_submit_missing_its_reference_is_refused_not_reported_as_i2i() -> None:
     """The route-error listener is the only thing between a dropped upload and a
     plausible T2I result handed back as image-to-image. Flow answers 200 either way.
@@ -3115,3 +3189,20 @@ async def test_an_image_submit_that_stays_disabled_is_drift_not_a_hang(
             page, GenerateImageRequest(prompt="a blue cup")
         )
     assert page.dom.submit_clicked == 0
+
+
+async def test_pre_submit_gate_refuses_blocking_overlay_before_network_observers() -> None:
+    from gflow_cli.api.image import GenerateImageRequest
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = _image_page()
+    page.dom.pane_open = True
+
+    with pytest.raises(UiSelectorDriftError, match="blocking overlay"):
+        await MigratedComposer().submit_images_and_observe(
+            page, GenerateImageRequest(prompt="a blue cup")
+        )
+
+    assert page.dom.submit_clicked == 0
+    assert page.listeners("request") == []
+    assert page.listeners("response") == []

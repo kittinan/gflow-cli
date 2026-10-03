@@ -376,6 +376,14 @@ def test_list_videos_carries_duration(seeded: Path) -> None:
     assert rows[0].duration > 0  # float, e.g. 6.0
 
 
+@pytest.mark.parametrize("all_copies", [False, True])
+def test_list_videos_carries_asset_status(seeded: Path, all_copies: bool) -> None:
+    """#896/#898: without the column, 'generated but not downloaded' and 'never
+    generated' read the same."""
+    rows = list_videos(db_path=seeded, profile="alice", limit=1, offset=0, all_copies=all_copies)
+    assert rows[0].status == "ready"
+
+
 # ─── list_profiles ────────────────────────────────────────────────────────────
 
 
