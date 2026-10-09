@@ -443,6 +443,35 @@ async def test_e2e_t2i_runs_on_a_moved_account(
     assert "ui_driver.migrated_host_bail" not in events
 
 
+@pytest.mark.asyncio
+@pytest.mark.e2e_image
+async def test_e2e_image_avatar_attaches_the_likeness_on_a_moved_account(
+    e2e_profile_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_log_capture: structlog.testing.LogCapture,
+) -> None:
+    """``gflow image avatar`` attaches the account likeness before submit.
+
+    It used to return exit 0 with a generic image: the migrated image path never attached
+    the Avatar. Needs an account that owns an Avatar; image runs spend no credits.
+    """
+    project = _project_id()
+    _set_flow_host(monkeypatch, None)
+    req = GenerateImageRequest(prompt="a portrait in a bright studio", use_avatar=True)
+    async with FlowApiClient(profile_dir=e2e_profile_dir, out_dir=tmp_path) as client:
+        page = client._page  # noqa: SLF001 - the e2e reads the live page
+        assert page is not None
+        if flow_host_kind(page.url) != "migrated":
+            pytest.skip("profile is not on the migrated host")
+        image = await client.generate_image(project_id=project, req=req)
+
+    assert image.media_name and image.fife_url
+    events = [str(e.get("event")) for e in install_log_capture.entries]
+    assert "migrated.avatar_attached" in events
+    assert events.index("migrated.avatar_attached") < events.index("migrated.prompt_typed")
+
+
 def _spy_on_client_mint(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Record every client-side reCAPTCHA mint -- successful or not (#891)."""
     calls: list[str] = []

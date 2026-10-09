@@ -3632,6 +3632,11 @@ async def run_images(
                     f"{len(chips)} mention chip(s) were bound before submit"
                 )
             )
+    if request.attaches_likeness:
+        # `gflow image avatar`: the same prompt-box popover as video, and the same last-
+        # before-the-prompt order. Without it Flow generated a generic image and the run
+        # exited 0 with the Avatar silently dropped (measured 2026-10-09).
+        await composer.attach_avatar(page)
     await composer.send_prompt(page, request.prompt, append=bool(reference_ids))
     return await composer.submit_images_and_observe(
         page,

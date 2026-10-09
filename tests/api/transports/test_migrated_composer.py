@@ -3206,3 +3206,59 @@ async def test_pre_submit_gate_refuses_blocking_overlay_before_network_observers
     assert page.dom.submit_clicked == 0
     assert page.listeners("request") == []
     assert page.listeners("response") == []
+
+
+# ----------------------------------------------------------------------------------
+# run_images + the account Avatar. `gflow image avatar` on flow.google.com returned
+# exit 0 with a generic image: run_images never attached the likeness, so the
+# request's `use_avatar` was dropped without a word (measured live 2026-10-09).
+# ----------------------------------------------------------------------------------
+
+
+def _spy_composer(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    calls: list[str] = []
+
+    def spy(name: str, result: object = None) -> object:
+        async def method(self: object, *args: object, **kwargs: object) -> object:
+            calls.append(name)
+            return result
+
+        return method
+
+    for name in ("ensure_editor", "apply_image_settings", "attach_avatar", "send_prompt"):
+        monkeypatch.setattr(MigratedComposer, name, spy(name))
+    monkeypatch.setattr(MigratedComposer, "submit_images_and_observe", spy("submit", []))
+    return calls
+
+
+async def test_image_avatar_attaches_the_likeness_before_the_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gflow_cli.api.image import GenerateImageRequest
+    from gflow_cli.api.transports.migrated_composer import run_images
+
+    calls = _spy_composer(monkeypatch)
+    req = GenerateImageRequest(prompt="a portrait", use_avatar=True)
+
+    await run_images(FakePage(), req, project_id="p1")
+
+    assert calls == [
+        "ensure_editor",
+        "apply_image_settings",
+        "attach_avatar",
+        "send_prompt",
+        "submit",
+    ]
+
+
+async def test_a_plain_image_run_attaches_no_avatar(monkeypatch: pytest.MonkeyPatch) -> None:
+    from gflow_cli.api.image import GenerateImageRequest
+    from gflow_cli.api.transports.migrated_composer import run_images
+
+    calls = _spy_composer(monkeypatch)
+
+    await run_images(FakePage(), GenerateImageRequest(prompt="a cup"), project_id="p1")
+
+    assert "attach_avatar" not in calls

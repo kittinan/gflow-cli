@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gflow image avatar` on flow.google.com ignored the Avatar and still exited 0.** The
+  migrated image path never attached the account likeness, so Flow generated a generic
+  image from the prompt alone. It now attaches the Avatar through the prompt box before
+  typing, as `video avatar` does. Live 2026-10-09: an e2e failed on the old code (no
+  `migrated.avatar_attached`) and passed after it, and the image showed the account's
+  Avatar where the old run had drawn a stranger.
 - **The generation browser reported a window geometry no real browser has.** Both
   headed generation contexts (the shared client and the standalone UI-automation
   transport) emulated a viewport, and Playwright's emulation rewrites `screen.*` to the
