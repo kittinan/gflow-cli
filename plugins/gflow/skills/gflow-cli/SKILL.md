@@ -70,10 +70,11 @@ gflow image t2i "<prompt>" [--model {nano2|nano2-lite|nano-pro|image4}] \
                             [-n 1..4] [--out DIR]
 gflow image i2i "<prompt>" --ref PATH_OR_UUID [--ref ...] [...same as t2i]
 gflow image avatar "<prompt>" [...same as t2i, minus every --ref option]  # prompt + the ACCOUNT's Flow Avatar; region gated, see below
+gflow image upscale <mediaId> --scale {2k|4k} [--project ID] [--out DIR]  # 4K is Ultra-only
 gflow image batch <manifest.tsv|manifest.json> [-n 1..4] [--aspect ...] [--out DIR]  # shared project, up to 5 prompts; refuses any row ref (exit 2)
 gflow run --config <batch.json>                           # JSON image batch; a row's "ref" may be "batch:N" (an earlier
                                                           # row's image, in place, no upload) or a local file (uploaded once)
-# On migrated flow.google.com accounts (#639), t2i and i2i are ported (a project is
+# For accounts Flow serves flow.google.com (#639), t2i, i2i, and upscale are ported (a project is
 # created when --project is omitted, #864): i2i accepts local --ref files only, all
 # five aspects. UUIDs, @Name/entity references, Imagen 4 (image4), and image batch
 # are refused there with exit 36.
@@ -83,6 +84,7 @@ gflow video t2v "<prompt>" [--project ID] [--model ...] [--duration 4|6|8|10] [-
 gflow video i2v --initial-frame <image|media-UUID> "<prompt>" [--out-dir DIR] [...same as t2v]  # UUID = in-project asset, no re-upload (#287; pair with --project)
 gflow video r2v "<prompt>" --ref IMG [--ref IMG ...] [--avatar]   # ingredients; --avatar adds the account likeness too
 gflow video avatar "<prompt>" [...same as t2v]                    # prompt + the ACCOUNT's Flow Avatar, no image inputs
+gflow video upscale <mediaId> --scale {1080p|720p|270p} [--project ID] [--out DIR]  # 1080p = Full HD, 720p = original, 270p = GIF
 # `gflow video` has no `batch` subcommand — that stub never worked and was
 # removed. For multi-clip runs, loop `gflow video t2v`/`i2v` from the shell.
 gflow video chain <manifest.jsonl> [--out-dir DIR] [--dry-run] \

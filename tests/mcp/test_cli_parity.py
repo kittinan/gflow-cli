@@ -76,6 +76,8 @@ CLI_TO_MCP: dict[str, str] = {
     # recover an asset the user already paid for. An agent whose generation died at the
     # download is stranded exactly as a CLI user is, so this one is NOT exempt (#865).
     "data download": "gflow_download_media",
+    "image upscale": "gflow_upscale_image",
+    "video upscale": "gflow_upscale_video",
     "project list": "gflow_list_projects",
     "instructions list": "gflow_instructions_list",
     "instructions add": "gflow_instructions_add",
@@ -163,7 +165,6 @@ _MCP_EXEMPT: dict[str, str] = {
     ),
     "image batch": "batch pipelines — not yet ported",
     "image upload": "asset upload — covered indirectly by reference_images paths",
-    "image upscale": "not yet ported",
     "video avatar": (
         "Avatar/likeness is verified-identity + region gated and could not be "
         "live-verified before shipping; held off the agent surface deliberately"

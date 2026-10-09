@@ -188,7 +188,7 @@ SUBMIT_RPCS = ("YhhmEf", "eb1hJf", "MZZa6b", "nprQif")
 #: The start+end (interpolation) submit. Same composer, different contract: the model
 #: key is ``veo_3_1_interpolation_lite``, the body carries BOTH frame ids, and the rpc
 #: name travels in the ``f.req`` body — the URL carries no ``rpcids`` query param
-#: (captured 2026-09-16, issue #639). The reply embeds the standard ``CAE`` record,
+#: (captured 2026-09-16, issue #639). The reply embeds the standard generation record,
 #: so status/terminal/download are shared with the other submit rpcs.
 INTERPOLATION_SUBMIT_RPC = "nprQif"
 IMAGE_SUBMIT_RPC = "ogiZ0b"
@@ -514,6 +514,16 @@ IMAGE_MODEL_MENU_MATCHERS: dict[ImageModel, ModelMenuMatcher] = {
     ImageModel.NARWHAL: ModelMenuMatcher("Nano Banana 2", excludes=("Lite",)),
     ImageModel.GEM_PIX_2: ModelMenuMatcher("Nano Banana Pro"),
     ImageModel.HARBOR_SEAL: ModelMenuMatcher("Nano Banana 2 Lite"),
+}
+
+#: Wire tokens an ``ogiZ0b`` body may carry for a model, where not just its own name.
+#: "Nano Banana 2.1" REPLACED "Nano Banana 2" in the menu and sends ``BELUGA``; Flow's
+#: catalogue no longer lists ``NARWHAL`` at all (#958, measured on two accounts 2026-10-08,
+#: ``scripts/dev/spike_nano_banana_21_wire.py``). Accepting BELUGA is only safe while the
+#: two are never offered side by side: the "already selected" shortcut in
+#: ``_select_image_model`` would then let a ``nano2`` request run 2.1 unnoticed.
+IMAGE_MODEL_WIRE_TOKENS: dict[ImageModel, tuple[str, ...]] = {
+    ImageModel.NARWHAL: ("NARWHAL", "BELUGA"),
 }
 
 
@@ -966,7 +976,9 @@ def _image_body_problem(
             "migrated host: the image submit body could not be read, so the request "
             "could not be confirmed before Flow acted on it"
         )
-    if model is not None and model.value not in body:
+    if model is not None and not any(
+        token in body for token in IMAGE_MODEL_WIRE_TOKENS.get(model, (model.value,))
+    ):
         return (
             f"migrated host: the image submit body does not carry requested model "
             f"{model.value} — refusing to report a generation made with persisted settings"
@@ -2994,10 +3006,8 @@ class MigratedComposer:
                     _settle(rec)
                 elif rid in STATUS_RPCS and workflow:
                     try:
-                        rec = generation_record(rid, payload)
+                        rec = generation_record(rid, payload, workflow_id=workflow["id"])
                     except WireFormatError:
-                        continue
-                    if rec.workflow_id != workflow["id"]:
                         continue
                     log.info("migrated.status", rpc=rid, status=rec.status, bytes=rec.size_bytes)
                     _settle(rec)
