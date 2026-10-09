@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
+from gflow_cli.browser_manager import gpu_args
 from gflow_cli.config import get_settings
 from gflow_cli.errors import SecurityError
 from gflow_cli.profile_lease import ProfileLease
@@ -366,7 +367,7 @@ async def verify_flow_session(
                     user_data_dir=str(profile_dir),
                     channel=channel,
                     headless=True,
-                    args=["--password-store=basic"],
+                    args=["--password-store=basic", *gpu_args()],
                 )
                 try:
                     cookies = await ctx.cookies()
@@ -516,7 +517,7 @@ async def _verify_migrated_host_fallback(
                 user_data_dir=str(profile_dir),
                 channel="chrome",
                 headless=True,
-                args=["--password-store=basic"],
+                args=["--password-store=basic", *gpu_args()],
             )
             try:
                 if not has_migrated_app_session(await ctx.cookies()):

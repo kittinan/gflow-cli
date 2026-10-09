@@ -216,6 +216,17 @@ def resolved_chrome_binary() -> str | None:
 GENERATION_WINDOW_SIZE_ARG = "--window-size=1920,1080"
 
 
+def gpu_args() -> list[str]:
+    """``--disable-gpu-sandbox`` under VirtualGL (``vglrun`` exports VGL_ISACTIVE=1).
+
+    The GPU sandbox blocks VGL from cloning the X display connection; on an NVIDIA host
+    Chrome's GPU process then died into software for everything, WebGL and WebGPU
+    disabled (measured on chrome://gpu) — a stronger bot signal than SwiftShader. Inert
+    without VirtualGL. Every Chrome launch site calls this, so none can miss it.
+    """
+    return ["--disable-gpu-sandbox"] if os.environ.get("VGL_ISACTIVE") == "1" else []
+
+
 def window_position_args(position: str) -> list[str]:
     """Chrome args placing the headed generation window (#923); '' keeps Chrome's own.
 

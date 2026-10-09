@@ -102,6 +102,7 @@ from gflow_cli.auth.verification import (
 from gflow_cli.browser_manager import (
     GENERATION_WINDOW_SIZE_ARG,
     channel_for_profile,
+    gpu_args,
     window_position_args,
 )
 from gflow_cli.config import BrowserEngine, Settings
@@ -567,7 +568,7 @@ class FlowApiClient:
                 # display connection to the 3D X server, crashing the GPU process
                 # (exit 256) into software rendering. Added only under vglrun
                 # (VGL_ISACTIVE=1) so hardware GPU acceleration works; inert otherwise.
-                *(["--disable-gpu-sandbox"] if os.environ.get("VGL_ISACTIVE") == "1" else []),
+                *gpu_args(),
                 GENERATION_WINDOW_SIZE_ARG,
                 *window_position_args(self.settings.browser_window_position),
             ],

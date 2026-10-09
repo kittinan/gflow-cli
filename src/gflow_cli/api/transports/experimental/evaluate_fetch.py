@@ -160,7 +160,7 @@ class EvaluateFetchTransport:
             self._lease = await ProfileLease(profile_dir).aacquire()
             # #477 guard AFTER the lease: a pre-wait check would validate a
             # 'Last Version' the holder rewrites as it releases (TOCTOU).
-            from gflow_cli.browser_manager import ensure_profile_engine_compatible
+            from gflow_cli.browser_manager import ensure_profile_engine_compatible, gpu_args
 
             ensure_profile_engine_compatible(profile_dir, None)
             pw = await pw_cm.__aenter__()
@@ -170,6 +170,7 @@ class EvaluateFetchTransport:
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--password-store=basic",
+                    *gpu_args(),
                 ],
                 viewport={"width": 1280, "height": 720},
                 locale="en-US",

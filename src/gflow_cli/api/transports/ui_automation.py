@@ -1069,6 +1069,7 @@ class UiAutomationTransport(VideoGenerationMixin):
                 GENERATION_WINDOW_SIZE_ARG,
                 channel_for_profile,
                 ensure_profile_engine_compatible,
+                gpu_args,
                 window_position_args,
             )
             from gflow_cli.config import get_settings
@@ -1099,7 +1100,7 @@ class UiAutomationTransport(VideoGenerationMixin):
                     # display connection, crashing Chrome's GPU process into
                     # software rendering. Added only under vglrun (VGL_ISACTIVE=1)
                     # so hardware GPU acceleration works; inert otherwise.
-                    *(["--disable-gpu-sandbox"] if os.environ.get("VGL_ISACTIVE") == "1" else []),
+                    *gpu_args(),
                     GENERATION_WINDOW_SIZE_ARG,
                     *window_position_args(get_settings().browser_window_position),
                 ],

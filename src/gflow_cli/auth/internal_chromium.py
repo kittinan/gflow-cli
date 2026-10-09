@@ -7,6 +7,7 @@ import structlog
 from playwright.async_api import Error as PlaywrightError
 from rich.console import Console
 
+from gflow_cli.browser_manager import gpu_args
 from gflow_cli.config import get_settings
 from gflow_cli.errors import (
     AuthBrowserRejectedError,
@@ -88,6 +89,7 @@ def login_launch_kwargs(
             # Load-bearing beyond auth: keeps the profile off the macOS
             # keychain, which api/client.py also depends on (#222).
             "--password-store=basic",
+            *gpu_args(),
         ],
     }
 

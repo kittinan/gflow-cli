@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Under VirtualGL, only the two generation launches kept Chrome's GPU.** `vglrun` needs
+  `--disable-gpu-sandbox`, or Chrome's GPU sandbox stops VGL cloning the X connection and,
+  on an NVIDIA host, every feature falls back to software with WebGL and WebGPU disabled
+  (measured on chrome://gpu). Login, session verification, the cookie read and the
+  experimental transports never passed it. Every Chrome launch now goes through one
+  helper, `browser_manager.gpu_args()`, and a test fails if a launch site skips it. Live
+  under Xvfb + `vglrun` (Intel/Mesa host): every main Chrome process carried the flag, the
+  login window reported a hardware WebGL renderer, and the generation e2e passed.
 - **`gflow image avatar` on flow.google.com ignored the Avatar and still exited 0.** The
   migrated image path never attached the account likeness, so Flow generated a generic
   image from the prompt alone. It now attaches the Avatar through the prompt box before

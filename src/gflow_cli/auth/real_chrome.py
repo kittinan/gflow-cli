@@ -10,7 +10,7 @@ import structlog
 from rich.console import Console
 
 from gflow_cli.auth import verification
-from gflow_cli.browser_manager import is_playwright_chrome_channel_available
+from gflow_cli.browser_manager import gpu_args, is_playwright_chrome_channel_available
 from gflow_cli.config import Settings, get_settings
 from gflow_cli.errors import (
     AuthBrowserRejectedError,
@@ -106,6 +106,7 @@ def _build_chrome_args(chrome_exe: str, profile_dir: Path, headless: bool) -> li
         "--no-default-browser-check",
         "--window-size=1920,1080",  # match the generation viewport (#315 consistency)
         "--password-store=basic",
+        *gpu_args(),
         # No --remote-debugging-port: zero automation surface.
     ]
     if headless:

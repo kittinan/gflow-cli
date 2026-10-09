@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
-from gflow_cli.browser_manager import channel_for_profile
+from gflow_cli.browser_manager import channel_for_profile, gpu_args
 from gflow_cli.errors import SecurityError
 from gflow_cli.paths import get_cookies_path
 from gflow_cli.profile_lease import ProfileLease
@@ -158,7 +158,7 @@ async def _get_chrome_cookies_playwright(profile_dir: Path) -> ChromeCookieSnaps
             user_data_dir=str(profile_dir),
             channel=channel,
             headless=True,
-            args=["--password-store=basic"],
+            args=["--password-store=basic", *gpu_args()],
         )
         try:
             all_cookies = await ctx.cookies()

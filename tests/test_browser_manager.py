@@ -16,6 +16,7 @@ Run with:
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -454,3 +455,41 @@ class TestLaunchSitesGuarded:
         assert not offenders, (
             f"launch_persistent_context call sites missing the #477 engine guard: {offenders}"
         )
+
+
+# --- gpu_args (VirtualGL) ------------------------------------------------------------
+#
+# Under VirtualGL the GPU sandbox blocks VGL from cloning the X display connection; on
+# an NVIDIA host Chrome then fell back to software everywhere, WebGL disabled (measured
+# on chrome://gpu). Every Chrome launch must go through the one helper.
+
+
+def test_gpu_args_disables_the_gpu_sandbox_only_under_virtualgl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gflow_cli.browser_manager import gpu_args
+
+    monkeypatch.setenv("VGL_ISACTIVE", "1")
+    assert gpu_args() == ["--disable-gpu-sandbox"]
+    monkeypatch.setenv("VGL_ISACTIVE", "0")
+    assert gpu_args() == []
+    monkeypatch.delenv("VGL_ISACTIVE")
+    assert gpu_args() == []
+
+
+def test_every_chrome_launch_site_uses_gpu_args() -> None:
+    """A new launch site must not silently miss the VirtualGL flag again."""
+    import gflow_cli
+
+    src = Path(gflow_cli.__file__).parent
+    launch = re.compile(r"launch_persistent_context\(|create_subprocess_exec\(")
+    missing = []
+    for path in sorted(src.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        line_starts = (text.rfind("\n", 0, m.start()) for m in launch.finditer(text))
+        calls = [i for i in line_starts if "def " not in text[i : i + 120].split("(")[0]]
+        if calls and "gpu_args()" not in text:
+            missing.append(str(path.relative_to(src)))
+        if path.name != "browser_manager.py":
+            assert "--disable-gpu-sandbox" not in text, f"{path.name}: use gpu_args()"
+    assert missing == []
