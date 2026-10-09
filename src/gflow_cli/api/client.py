@@ -97,7 +97,11 @@ from gflow_cli.auth.verification import (
     record_session_expiry,
     session_expires_at,
 )
-from gflow_cli.browser_manager import channel_for_profile, window_position_args
+from gflow_cli.browser_manager import (
+    GENERATION_WINDOW_SIZE_ARG,
+    channel_for_profile,
+    window_position_args,
+)
 from gflow_cli.config import BrowserEngine, Settings
 from gflow_cli.diagnostics import IncidentRecorder, run_retention, validated_incidents_root
 from gflow_cli.errors import (
@@ -530,7 +534,9 @@ class FlowApiClient:
         kwargs: JsonObject = {
             "user_data_dir": str(self.profile_dir),
             "headless": self.headless,
-            "viewport": {"width": 1280, "height": 720},
+            # Size the real window (args below), never emulate: see
+            # GENERATION_WINDOW_SIZE_ARG for the impossible geometry viewport= leaked.
+            "no_viewport": True,
             "locale": "en-US",
             "extra_http_headers": {"Accept-Language": "en-US,en;q=0.9"},
             "channel": channel_for_profile(self.profile_dir),
@@ -560,6 +566,7 @@ class FlowApiClient:
                 # (exit 256) into software rendering. Added only under vglrun
                 # (VGL_ISACTIVE=1) so hardware GPU acceleration works; inert otherwise.
                 *(["--disable-gpu-sandbox"] if os.environ.get("VGL_ISACTIVE") == "1" else []),
+                GENERATION_WINDOW_SIZE_ARG,
                 *window_position_args(self.settings.browser_window_position),
             ],
         }

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The generation browser reported a window geometry no real browser has.** Both
+  headed generation contexts (the shared client and the standalone UI-automation
+  transport) emulated a viewport, and Playwright's emulation rewrites `screen.*` to the
+  viewport while the OS window keeps its own size: a page measured `screen` 1280×720
+  with `outerHeight` 851, a window taller than its screen and no room for the toolbar.
+  Any fingerprinting script (reCAPTCHA Enterprise included) can read that. Both now
+  size the real window to 1920×1080 with `--window-size` and no emulation, as login
+  already did; measured on Xvfb 1920×1080: `screen` 1920×1080, `outer` 1919×1079,
+  `inner` 1919×936. Headless experimental transports are unchanged — a headless shell
+  has no browser chrome, so its inner and outer sizes are always equal.
 - **Every flow.google.com video submit failed with exit 7 while the clip rendered
   anyway.** Since 2026-10-03 the submit reply's generation record carries `null` where it
   carried the step marker `"CAE"`, and the parser required `"CAE"` — so an accepted,

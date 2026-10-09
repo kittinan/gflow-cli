@@ -207,6 +207,15 @@ def resolved_chrome_binary() -> str | None:
         return None
 
 
+# Real OS-window size for both headed generation launch sites, which pass
+# ``no_viewport=True`` instead of ``viewport=``. Playwright's viewport emulation
+# overrides ``screen.*`` to the viewport while the window keeps its own size, so
+# the page measured outerHeight > screen.height and innerHeight == screen.height —
+# a geometry no real browser has, readable by any fingerprinting script. Matches
+# the login launches (auth/internal_chromium.py, auth/real_chrome.py).
+GENERATION_WINDOW_SIZE_ARG = "--window-size=1920,1080"
+
+
 def window_position_args(position: str) -> list[str]:
     """Chrome args placing the headed generation window (#923); '' keeps Chrome's own.
 

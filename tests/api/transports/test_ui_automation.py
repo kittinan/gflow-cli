@@ -213,7 +213,7 @@ class TestSetup:
     @pytest.mark.asyncio
     async def test_own_context_path_launches_persistent_context(self, tmp_path: Path) -> None:
         """When page=None, strategy launches Playwright with the same args
-        the validated smoke uses (headless=False, viewport, locale)."""
+        the validated smoke uses (headless=False, real window size, locale)."""
         t = UiAutomationTransport()
         ctx = _make_fake_context(pages=[])
         pw_cm, fake_pw = _make_fake_playwright(ctx)
@@ -229,7 +229,10 @@ class TestSetup:
                 call_args = fake_pw.chromium.launch_persistent_context.call_args.args
                 assert call_args[0] == str(tmp_path)
                 assert call_kwargs.get("headless") is False
-                assert call_kwargs.get("viewport") == {"width": 1920, "height": 1080}
+                # Real window, no emulated viewport (impossible screen/outer geometry).
+                assert "viewport" not in call_kwargs
+                assert call_kwargs.get("no_viewport") is True
+                assert "--window-size=1920,1080" in call_kwargs["args"]
                 assert call_kwargs.get("locale") == "en-US"
                 # #923: the standalone launch honours the window position too.
                 assert "--window-position=-30000,-30000" in call_kwargs["args"]

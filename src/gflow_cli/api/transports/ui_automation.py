@@ -72,7 +72,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from playwright.async_api import Locator, Page, ViewportSize
+    from playwright.async_api import Locator, Page
 
     from gflow_cli.api.transports.base import GenerationRequestRecorder, TransportSetup
 
@@ -151,14 +151,6 @@ IMAGE_TAB_IN_MENU_SELECTORS = (
     "[role='menu'] [role='tab']:has-text('Image')",
     "[role='menu'] [role='tab']:has(i:text('image'))",
 )
-
-# Browser viewport — 1920×1080, the most common real desktop resolution (#315).
-# Enlarged from 1280×800 to reduce the static-fingerprint signal; bigger stays in
-# Flow's desktop layout (smaller would cross the responsive breakpoint and drift the
-# selectors). NOTE: the sibling CG Worker assumes the old size — reconcile there
-# separately. The REST client's own viewport
-# (client.py, 1280×720) is an independent, selector-irrelevant context and is unchanged.
-_VIEWPORT = {"width": 1920, "height": 1080}
 
 # Hosts allowed when downloading generated PNGs. Flow's fifeUrl currently
 # resolves to lh3.googleusercontent.com; the broader allow-list covers
@@ -1074,6 +1066,7 @@ class UiAutomationTransport(VideoGenerationMixin):
             import os
 
             from gflow_cli.browser_manager import (
+                GENERATION_WINDOW_SIZE_ARG,
                 channel_for_profile,
                 ensure_profile_engine_compatible,
                 window_position_args,
@@ -1093,7 +1086,9 @@ class UiAutomationTransport(VideoGenerationMixin):
             ctx = await pw.chromium.launch_persistent_context(
                 str(profile_dir),
                 headless=False,
-                viewport=cast("ViewportSize", _VIEWPORT),
+                # Real 1920×1080 window (#315's size), not an emulated viewport:
+                # see GENERATION_WINDOW_SIZE_ARG for the geometry viewport= leaked.
+                no_viewport=True,
                 locale=locale_env,
                 channel=channel,
                 args=[
@@ -1105,6 +1100,7 @@ class UiAutomationTransport(VideoGenerationMixin):
                     # software rendering. Added only under vglrun (VGL_ISACTIVE=1)
                     # so hardware GPU acceleration works; inert otherwise.
                     *(["--disable-gpu-sandbox"] if os.environ.get("VGL_ISACTIVE") == "1" else []),
+                    GENERATION_WINDOW_SIZE_ARG,
                     *window_position_args(get_settings().browser_window_position),
                 ],
             )

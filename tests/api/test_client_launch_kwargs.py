@@ -30,7 +30,12 @@ def test_persistent_context_kwargs_are_unchanged(tmp_path: Path) -> None:
     kwargs = client._persistent_context_kwargs()  # noqa: SLF001
     assert kwargs["user_data_dir"] == str(tmp_path)
     assert kwargs["headless"] is True
-    assert kwargs["viewport"] == {"width": 1280, "height": 720}
+    # No viewport emulation: Playwright's ``viewport=`` overrides ``screen.*`` to
+    # the viewport while the OS window keeps its own size, so the page sees
+    # outerHeight > screen.height and innerHeight == screen.height — a geometry no
+    # real browser has. The real window is sized by --window-size instead.
+    assert "viewport" not in kwargs
+    assert kwargs["no_viewport"] is True
     assert kwargs["locale"] == "en-US"
     assert kwargs["extra_http_headers"] == {"Accept-Language": "en-US,en;q=0.9"}
     assert kwargs["ignore_default_args"] == [
@@ -50,6 +55,7 @@ def test_persistent_context_kwargs_are_unchanged(tmp_path: Path) -> None:
         "--password-store=basic",
         "--disable-blink-features=AutomationControlled",
         "--disable-dev-shm-usage",
+        "--window-size=1920,1080",
         "--window-position=-30000,-30000",
     ]
     # channel is profile-derived; a marker-less tmp_path has no
