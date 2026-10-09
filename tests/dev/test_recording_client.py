@@ -24,7 +24,7 @@ def test_recording_client_injects_video_and_preserves_base(tmp_path: Path) -> No
     kwargs = client._persistent_context_kwargs()  # noqa: SLF001
     # Recording kwargs injected:
     assert kwargs["record_video_dir"] == str(rec_dir)
-    assert kwargs["record_video_size"] == {"width": 1280, "height": 720}
+    assert kwargs["record_video_size"] == {"width": 1920, "height": 1080}
     # Base kwargs preserved untouched:
     assert kwargs["user_data_dir"] == str(tmp_path)
     assert kwargs["headless"] is True
@@ -32,5 +32,6 @@ def test_recording_client_injects_video_and_preserves_base(tmp_path: Path) -> No
         "--password-store=basic",
         "--disable-blink-features=AutomationControlled",
         "--disable-dev-shm-usage",
+        "--window-size=1920,1080",
         "--window-position=-30000,-30000",
     ]

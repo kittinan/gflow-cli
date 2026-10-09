@@ -16,8 +16,8 @@ _SEG = r"[a-z0-9]+(?:_[a-z0-9]+)*"
 _KEY_RE = re.compile(rf"^{_SEG}(?:\.{_SEG})+$")
 _SURFACE_KEY_RE = re.compile(rf"^{_SEG}(?:\.{_SEG})*$")
 
-# ui_automation.py:117-124 — below this, Flow crosses its responsive breakpoint
-# and the selectors drift. A probe rendering smaller reports drift that is not there.
+# The generation window size (browser_manager.GENERATION_WINDOW_SIZE_ARG, #315). A
+# probe rendering smaller than it reports drift that is not there.
 MIN_VIEWPORT = (1920, 1080)
 
 
